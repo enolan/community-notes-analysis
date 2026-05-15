@@ -1,0 +1,10 @@
+[project]
+name = "community-notes-analysis"
+version = "0.1.0"
+description = "Rank X/Twitter accounts by how many publicly-shown Community Notes their posts received"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyarrow>=16",
+    "httpx>=0.27",
+]
