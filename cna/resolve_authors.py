@@ -7,9 +7,11 @@ that deleted/suspended/protected tweets return a tombstone instead of a user
 (the same suspension bias discussed up front: the most-noted accounts are the
 most likely to be gone).
 
-Resumable: every result (including terminal failures) is written to a SQLite
-cache. Re-running skips anything already resolved and only retries transient
-errors, so you can Ctrl-C and continue.
+Captures author id/handle, the tweet's text (kept forever, even if the post is
+later deleted), creation time and like count, into the persistent `tweets`
+table. Resumable: re-running only fetches tweets that are new, errored, or
+resolved-OK-but-missing-text (one-time backfill); terminally-resolved tweets
+with text are never refetched, so you can Ctrl-C and continue.
 
 Usage:
   uv run python -m cna.resolve_authors [--limit N] [--concurrency C] [--rps R]
@@ -29,13 +31,9 @@ import time
 
 import httpx
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IDS_PATH = os.path.join(ROOT, "out", "helpful_tweet_ids.txt")
-DB_PATH = os.path.join(ROOT, "resolve-cache.sqlite")
-ENDPOINT = "https://cdn.syndication.twimg.com/tweet-result"
+from cna.db import DB_PATH, TERMINAL, connect
 
-# Terminal statuses: never retried on a re-run. "error" is transient -> retried.
-TERMINAL = {"ok", "notfound", "tombstone", "protected", "suspended"}
+ENDPOINT = "https://cdn.syndication.twimg.com/tweet-result"
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -68,35 +66,17 @@ def make_token(tweet_id: str) -> str:
     return re.sub(r"(0+|\.)", "", s) or "0"
 
 
-def init_db() -> sqlite3.Connection:
-    db = sqlite3.connect(DB_PATH)
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS resolved (
-            tweet_id    TEXT PRIMARY KEY,
-            author_id   TEXT,
-            screen_name TEXT,
-            status      TEXT NOT NULL,
-            fetched_at  REAL NOT NULL
-        )"""
-    )
-    db.commit()
-    return db
-
-
 def pending_ids(db: sqlite3.Connection) -> list[str]:
-    if not os.path.exists(IDS_PATH):
-        raise SystemExit(f"{IDS_PATH} missing. Run `python -m cna.load_filter` first.")
-    with open(IDS_PATH) as f:
-        all_ids = [ln.strip() for ln in f if ln.strip()]
-    done = {
-        row[0]
-        for row in db.execute(
-            f"SELECT tweet_id FROM resolved WHERE status IN "
-            f"({','.join('?' * len(TERMINAL))})",
-            tuple(TERMINAL),
-        )
-    }
-    return [i for i in all_ids if i not in done]
+    """Tweets needing a fetch: never resolved, a transient error, or resolved
+    OK before we captured text (one-time backfill). Terminally-resolved tweets
+    that already have text are skipped — we never refetch them."""
+    q = db.execute(
+        f"""SELECT tweet_id FROM tweets
+            WHERE status NOT IN ({",".join("?" * len(TERMINAL))})
+               OR (status = 'ok' AND text IS NULL)""",
+        TERMINAL,
+    )
+    return [r[0] for r in q]
 
 
 class RateLimiter:
@@ -116,37 +96,57 @@ class RateLimiter:
             await asyncio.sleep(sleep_for)
 
 
-def classify(resp: httpx.Response) -> tuple[str, str | None, str | None]:
-    """Return (status, author_id, screen_name)."""
+# (status, author_id, screen_name, text, tweet_created_at, favorite_count)
+Result = tuple[str, str | None, str | None, str | None, str | None, int | None]
+_MISS: Result = ("tombstone", None, None, None, None, None)
+
+
+def classify(resp: httpx.Response) -> Result:
     if resp.status_code == 404:
-        return "notfound", None, None
+        return ("notfound", None, None, None, None, None)
     if resp.status_code == 200:
         try:
             data = resp.json()
         except Exception:
-            return "tombstone", None, None
+            return _MISS
         if not data:
-            return "tombstone", None, None
-        typename = data.get("__typename")
-        if typename == "Tweet" and isinstance(data.get("user"), dict):
+            return _MISS
+        if data.get("__typename") == "Tweet" and isinstance(data.get("user"), dict):
             u = data["user"]
-            return "ok", u.get("id_str"), u.get("screen_name")
+            # `note_tweet` carries the full body of long (>280) posts.
+            text = (
+                data.get("note_tweet", {})
+                .get("note_tweet_results", {})
+                .get("result", {})
+                .get("text")
+                if isinstance(data.get("note_tweet"), dict)
+                else None
+            ) or data.get("text")
+            return (
+                "ok",
+                u.get("id_str"),
+                u.get("screen_name"),
+                text,
+                data.get("created_at"),
+                data.get("favorite_count"),
+            )
         # Tombstone: deleted / suspended / protected / age-restricted.
-        text = (data.get("tombstone", {}) or {}).get("text", {}) or {}
-        msg = (text.get("text") or "").lower()
+        msg = (
+            ((data.get("tombstone", {}) or {}).get("text", {}) or {}).get("text") or ""
+        ).lower()
         if "suspend" in msg:
-            return "suspended", None, None
+            return ("suspended", None, None, None, None, None)
         if "protect" in msg or "private" in msg:
-            return "protected", None, None
-        return "tombstone", None, None
+            return ("protected", None, None, None, None, None)
+        return _MISS
     raise httpx.HTTPStatusError("retry", request=resp.request, response=resp)
 
 
 async def fetch_one(
     client: httpx.AsyncClient, limiter: RateLimiter, tweet_id: str
-) -> tuple[str, str, str | None, str | None]:
+) -> tuple[str, Result]:
     delay = 1.0
-    for attempt in range(6):
+    for _ in range(6):
         await limiter.wait()
         try:
             resp = await client.get(
@@ -159,22 +159,21 @@ async def fetch_one(
                 await asyncio.sleep(min(wait, 60.0))
                 delay = min(delay * 2, 60.0)
                 continue
-            status, aid, sn = classify(resp)
-            return tweet_id, status, aid, sn
+            return tweet_id, classify(resp)
         except (httpx.TransportError, httpx.HTTPStatusError):
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60.0)
-    return tweet_id, "error", None, None
+    return tweet_id, ("error", None, None, None, None, None)
 
 
 async def run(limit: int | None, concurrency: int, rps: float) -> None:
-    db = init_db()
+    db = connect()
     todo = pending_ids(db)
     if limit:
         todo = todo[:limit]
     total = len(todo)
     if not total:
-        print("Nothing to resolve — cache already covers all tweetIds.")
+        print("Nothing to resolve — every tracked tweet is already resolved.")
         return
     print(f"Resolving {total:,} tweetIds (concurrency={concurrency}, rps={rps})")
 
@@ -194,18 +193,24 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
             async with sem:
                 return await fetch_one(client, limiter, tid)
 
+        upd = (
+            "UPDATE tweets SET status=?, author_id=?, screen_name=?, text=?, "
+            "tweet_created_at=?, favorite_count=?, resolved_at=? WHERE tweet_id=?"
+        )
+
+        def flush(batch: list[tuple]) -> None:
+            db.executemany(upd, batch)
+            db.commit()
+            batch.clear()
+
         tasks = [asyncio.create_task(worker(t)) for t in todo]
         batch: list[tuple] = []
         for fut in asyncio.as_completed(tasks):
-            tid, status, aid, sn = await fut
-            batch.append((tid, aid, sn, status, time.time()))
+            tid, (status, aid, sn, text, created, favs) = await fut
+            batch.append((status, aid, sn, text, created, favs, time.time(), tid))
             done += 1
             if len(batch) >= 200:
-                db.executemany(
-                    "INSERT OR REPLACE INTO resolved VALUES (?,?,?,?,?)", batch
-                )
-                db.commit()
-                batch.clear()
+                flush(batch)
             if done % 1000 == 0 or done == total:
                 rate = done / (time.monotonic() - t0)
                 eta = (total - done) / rate / 60 if rate else 0
@@ -214,17 +219,18 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
                     flush=True,
                 )
         if batch:
-            db.executemany(
-                "INSERT OR REPLACE INTO resolved VALUES (?,?,?,?,?)", batch
-            )
-            db.commit()
+            flush(batch)
 
     by_status = dict(
-        db.execute("SELECT status, COUNT(*) FROM resolved GROUP BY status")
+        db.execute("SELECT status, COUNT(*) FROM tweets GROUP BY status")
     )
-    print("\nCache status breakdown:")
+    with_text = db.execute(
+        "SELECT COUNT(*) FROM tweets WHERE text IS NOT NULL"
+    ).fetchone()[0]
+    print("\nTweet store status breakdown:")
     for s, c in sorted(by_status.items(), key=lambda x: -x[1]):
-        print(f"  {s:10s} {c:,}")
+        print(f"  {s or '(unresolved)':14s} {c:,}")
+    print(f"  tweets with text saved: {with_text:,}")
 
 
 def main() -> None:

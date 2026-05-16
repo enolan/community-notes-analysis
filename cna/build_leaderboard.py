@@ -1,98 +1,116 @@
-"""Step 3: rank accounts by number of distinct publicly-shown-noted tweets.
+"""Step 3: rank accounts, and export every noted tweet's text.
 
-Joins the distinct helpful-noted tweet set (out/helpful_tweet_ids.txt) against
-the resolver cache. Aggregation key is author_id (stable across handle changes);
-the displayed handle is the one X returned at resolve time.
+Reads the persistent `tweets` store (the cross-run record of every post that
+ever got a publicly-shown Community Note). Ranking key is author_id (stable
+across handle changes); the displayed handle is the one X returned at resolve
+time.
 
-Output:
-  out/leaderboard.csv   rank, author_id, screen_name, noted_tweets
-and a printed top-N plus a coverage/loss report.
+Outputs:
+  out/leaderboard.csv    rank, author_id, screen_name, noted_tweets
+  out/noted_tweets.csv   tweet_id, screen_name, author_id, first_noted_at,
+                         tweet_created_at, favorite_count, status, text
+                         (every tracked tweet; text present for resolved ones)
 
 Read the coverage report before trusting the ranking: deleted/suspended tweets
-cannot be attributed, and the heaviest-noted accounts are the most likely to be
-suspended, so this undercounts exactly the accounts most likely to top the list.
+can't be attributed, and the heaviest-noted accounts are the most likely to be
+gone, so this undercounts exactly the accounts most likely to top the list.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import os
-import sqlite3
 from collections import Counter, defaultdict
 
+from cna.db import connect
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IDS_PATH = os.path.join(ROOT, "out", "helpful_tweet_ids.txt")
-DB_PATH = os.path.join(ROOT, "resolve-cache.sqlite")
-OUT_CSV = os.path.join(ROOT, "out", "leaderboard.csv")
+OUT_DIR = os.path.join(ROOT, "out")
+LEADERBOARD_CSV = os.path.join(OUT_DIR, "leaderboard.csv")
+TWEETS_CSV = os.path.join(OUT_DIR, "noted_tweets.csv")
+
+
+def _iso(ms: int | None) -> str:
+    if not ms:
+        return ""
+    return dt.datetime.fromtimestamp(ms / 1000, dt.UTC).isoformat()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=30, help="rows to print")
     args = ap.parse_args()
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-    with open(IDS_PATH) as f:
-        universe = {ln.strip() for ln in f if ln.strip()}
-
-    db = sqlite3.connect(DB_PATH)
+    db = connect()
     rows = db.execute(
-        "SELECT tweet_id, author_id, screen_name, status FROM resolved"
+        """SELECT tweet_id, author_id, screen_name, status, first_noted_at_ms,
+                  tweet_created_at, favorite_count, text
+           FROM tweets"""
     ).fetchall()
 
     status_counts: Counter[str] = Counter()
     tweets_by_author: defaultdict[str, int] = defaultdict(int)
     handle: dict[str, str] = {}
-    resolved_in_universe = 0
 
-    for tweet_id, author_id, screen_name, status in rows:
-        if tweet_id not in universe:
-            continue  # cache may hold ids from a wider/older run
-        status_counts[status] += 1
-        if status == "ok" and author_id:
-            resolved_in_universe += 1
-            tweets_by_author[author_id] += 1
-            handle[author_id] = screen_name or handle.get(author_id, "")
+    with open(TWEETS_CSV, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            ["tweet_id", "screen_name", "author_id", "first_noted_at",
+             "tweet_created_at", "favorite_count", "status", "text"]
+        )
+        for tid, aid, sn, status, noted_ms, created, favs, text in rows:
+            status_counts[status or "(unresolved)"] += 1
+            if status == "ok" and aid:
+                tweets_by_author[aid] += 1
+                handle[aid] = sn or handle.get(aid, "")
+            w.writerow(
+                [tid, sn or "", aid or "", _iso(noted_ms), created or "",
+                 favs if favs is not None else "", status or "", text or ""]
+            )
 
     leaderboard = sorted(
         tweets_by_author.items(), key=lambda kv: (-kv[1], handle.get(kv[0], ""))
     )
-
-    os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
-    with open(OUT_CSV, "w", newline="") as f:
+    with open(LEADERBOARD_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["rank", "author_id", "screen_name", "noted_tweets"])
         for rank, (aid, n) in enumerate(leaderboard, 1):
             w.writerow([rank, aid, handle.get(aid, ""), n])
 
-    total = len(universe)
-    cached = sum(status_counts.values())
-    unresolved = cached - resolved_in_universe
+    total = len(rows)
+    attributed = sum(tweets_by_author.values())
+    text_saved = sum(1 for r in rows if r[7])
+    pending = status_counts.get("(unresolved)", 0) + status_counts.get("error", 0)
 
-    print(f"Distinct publicly-shown-noted tweets (universe): {total:,}")
-    print(f"  in resolver cache:                             {cached:,}")
-    print(f"  attributed to an author (status=ok):           {resolved_in_universe:,}")
-    print(f"  unattributable (deleted/suspended/etc.):       {unresolved:,}")
-    if total:
-        print(f"  attribution rate:                              "
-              f"{resolved_in_universe / total:.1%}")
-    if cached < total:
-        print(f"  NOT YET RESOLVED:                              "
-              f"{total - cached:,}  (run cna.resolve_authors)")
-    print("  cache status breakdown: " + ", ".join(
+    print(f"Tweets tracked (all runs):       {total:,}")
+    print(f"  attributed to an author (ok):  {attributed:,}  "
+          f"({attributed / total:.1%})" if total else "")
+    print(f"  text captured & stored:        {text_saved:,}")
+    print(f"  unattributable (deleted/susp): "
+          f"{total - attributed - pending:,}")
+    if pending:
+        print(f"  NOT YET RESOLVED:              {pending:,}  "
+              f"(run cna.resolve_authors)")
+    print("  status breakdown: " + ", ".join(
         f"{s}={c:,}" for s, c in status_counts.most_common()))
-    print(f"\nUnique accounts ranked: {len(leaderboard):,}  ->  {OUT_CSV}")
+    print(f"\nUnique accounts ranked: {len(leaderboard):,}")
+    print(f"  -> {LEADERBOARD_CSV}")
+    print(f"  -> {TWEETS_CSV}  (tweet text for every tracked tweet)")
+
     print(f"\nTop {min(args.top, len(leaderboard))} accounts by publicly-shown "
           f"Community Notes:")
     print(f"{'#':>4}  {'handle':<24} {'noted tweets':>12}")
     for rank, (aid, n) in enumerate(leaderboard[: args.top], 1):
         print(f"{rank:>4}  @{handle.get(aid, ''):<23} {n:>12,}")
 
-    if unresolved:
+    if total - attributed - pending:
         print(
             "\nCaveat: unattributable tweets are concentrated among deleted/"
-            "suspended accounts, which skews toward the heaviest-noted accounts. "
-            "Treat this as a lower bound per account."
+            "suspended accounts, skewing toward the heaviest-noted accounts. "
+            "Treat per-account counts as a lower bound."
         )
 
 

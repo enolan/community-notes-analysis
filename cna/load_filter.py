@@ -23,7 +23,10 @@ import glob
 import json
 import os
 import sys
+import time
 import zipfile
+
+from cna.db import TERMINAL, connect
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -31,6 +34,8 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
 HELPFUL = "CURRENTLY_RATED_HELPFUL"
+# createdAtMillis = when the note was written -> earliest = when this post got noted
+NOTE_COLS = ["noteId", "tweetId", "createdAtMillis"]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "out")
 FRESH_DIR = os.path.join(ROOT, "data", "fresh")
@@ -73,7 +78,7 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     zip_notes = os.path.join(ZIPS_DIR, "notes-*.zip")
     zip_nsh = os.path.join(ZIPS_DIR, "noteStatusHistory-*.zip")
     if glob.glob(zip_notes) and glob.glob(zip_nsh):
-        notes = _read_streams(list(_zip_streams(zip_notes)), ["noteId", "tweetId"])
+        notes = _read_streams(list(_zip_streams(zip_notes)), NOTE_COLS)
         nsh = _read_streams(
             list(_zip_streams(zip_nsh)), ["noteId", "currentStatus"]
         )
@@ -84,7 +89,7 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     if glob.glob(fresh_notes) and glob.glob(fresh_nsh):
         notes = _read_streams(
             [open(p, "rb") for p in sorted(glob.glob(fresh_notes))],
-            ["noteId", "tweetId"],
+            NOTE_COLS,
         )
         nsh = _read_streams(
             [open(p, "rb") for p in sorted(glob.glob(fresh_nsh))],
@@ -95,7 +100,7 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     notes_pq = os.path.join(ROOT, "data", "notes.parquet")
     nsh_pq = os.path.join(ROOT, "data", "nsh.parquet")
     if os.path.exists(notes_pq) and os.path.exists(nsh_pq):
-        notes = pq.read_table(notes_pq, columns=["noteId", "tweetId"])
+        notes = pq.read_table(notes_pq, columns=NOTE_COLS)
         nsh = pq.read_table(nsh_pq, columns=["noteId", "currentStatus"])
         return notes, nsh, "HF mirror parquet (deadbirds, ~Feb 2025)"
 
@@ -119,27 +124,58 @@ def main() -> None:
     helpful_set = pa.array(set(helpful_note_ids.to_pylist()), type=pa.string())
 
     helpful_notes = notes.filter(pc.is_in(notes["noteId"], value_set=helpful_set))
-    tweet_ids = helpful_notes["tweetId"].to_pylist()
-    distinct = sorted(t for t in set(tweet_ids) if t and t not in ("0", "-1"))
+    # earliest helpful note per tweet = when that post first got a note
+    first_noted = (
+        helpful_notes.select(["tweetId", "createdAtMillis"])
+        .group_by("tweetId")
+        .aggregate([("createdAtMillis", "min")])
+    )
+    rows = [
+        (tid, int(ms))
+        for tid, ms in zip(
+            first_noted["tweetId"].to_pylist(),
+            first_noted["createdAtMillis_min"].to_pylist(),
+        )
+        if tid and tid not in ("0", "-1") and ms is not None
+    ]
+
+    # Register into the persistent store. New tweets get status='' (unresolved,
+    # the resolver will pick them up); existing rows keep their resolved data
+    # and only have first_noted_at_ms tightened to the earliest seen.
+    now = time.time()
+    db = connect()
+    db.executemany(
+        """INSERT INTO tweets (tweet_id, first_noted_at_ms, first_seen_at, status)
+           VALUES (?, ?, ?, '')
+           ON CONFLICT(tweet_id) DO UPDATE SET
+               first_noted_at_ms = MIN(
+                   IFNULL(tweets.first_noted_at_ms, excluded.first_noted_at_ms),
+                   excluded.first_noted_at_ms)""",
+        [(tid, ms, now) for tid, ms in rows],
+    )
+    db.commit()
+
+    total = db.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
+    pending = db.execute(
+        "SELECT COUNT(*) FROM tweets WHERE status NOT IN (?,?,?,?)", TERMINAL
+    ).fetchone()[0]
+    backfill = db.execute(
+        "SELECT COUNT(*) FROM tweets WHERE status='ok' AND text IS NULL"
+    ).fetchone()[0]
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    ids_path = os.path.join(OUT_DIR, "helpful_tweet_ids.txt")
-    with open(ids_path, "w") as f:
-        f.write("\n".join(distinct) + "\n")
-
     stats = {
         "source": source,
         "total_notes": notes.num_rows,
-        "total_status_rows": nsh.num_rows,
         "helpful_notes": len(helpful_set),
-        "helpful_notes_joined_to_a_tweet": len(tweet_ids),
-        "distinct_helpful_noted_tweets": len(distinct),
+        "distinct_helpful_noted_tweets_this_snapshot": len(rows),
+        "tweets_tracked_total_all_runs": total,
+        "tweets_pending_resolution": pending,
+        "ok_tweets_missing_text_backfill": backfill,
     }
     with open(os.path.join(OUT_DIR, "filter_stats.json"), "w") as f:
         json.dump(stats, f, indent=2)
-
     print(json.dumps(stats, indent=2))
-    print(f"\nWrote {len(distinct):,} distinct tweetIds -> {ids_path}")
 
 
 if __name__ == "__main__":

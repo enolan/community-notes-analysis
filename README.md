@@ -1,7 +1,10 @@
 # community-notes-analysis
 
-Rank X/Twitter accounts by how many of their posts received a **publicly-shown
-Community Note** (a note that reached `CURRENTLY_RATED_HELPFUL`).
+A persistent watchlist of X/Twitter accounts whose posts get **publicly-shown
+Community Notes** (notes that reached `CURRENTLY_RATED_HELPFUL`). Tracks every
+noted tweet across runs and stores each tweet's **text** (kept forever, even if
+the post is later deleted), so you can see who repeatedly posts noted claims and
+what they said.
 
 ## Why it's built this way
 
@@ -21,9 +24,10 @@ Community Note** (a note that reached `CURRENTLY_RATED_HELPFUL`).
 
 ## Data source
 
-The old `ton.twimg.com/birdwatch-public-data/...` URLs are dead (404 for all
-dates); the official data is now gated behind the logged-in page at
-`x.com/i/communitynotes/download-data`. Sources, first match wins:
+The logged-in download page at `x.com/i/communitynotes/download-data` just
+links plain public files: `ton.twimg.com/birdwatch-public-data/YYYY/MM/DD/
+<dataset>/<dataset>-NNNNN.zip` (`.zip`, published daily, no auth). `fetch_data`
+pulls these directly. Sources, first match wins:
 
 1. **Fresh zips** — `zips/notes-*.zip` + `zips/noteStatusHistory-*.zip` exactly
    as downloaded from the logged-in page. Only those two datasets are read;
@@ -40,27 +44,38 @@ One command does everything (fetch latest → filter → resolve → leaderboard
 uv run python -m cna.update_all          # add --date YYYY-MM-DD to pin a snapshot
 ```
 
-`cna.fetch_data` downloads the latest public zips directly from
-`ton.twimg.com/birdwatch-public-data/...` (no login — the logged-in page just
-links these files), skipping shards whose size already matches. Safe to re-run
-or schedule daily: it's incremental and the resolver only touches uncached
-tweetIds. A `.lock` prevents two resolvers running at once.
+Safe to re-run or schedule: `fetch_data` skips shards whose size is unchanged,
+and **only newly-noted tweets are ever fetched** — every tweet's author + text
+is stored once in `resolve-cache.sqlite` (table `tweets`) and never refetched.
+Steady-state runs only resolve tweets noted since the last run.
 
 Or run stages individually:
 
 ```sh
-uv run python -m cna.fetch_data         # -> zips/notes-*.zip + noteStatusHistory-*.zip
-uv run python -m cna.load_filter        # -> out/helpful_tweet_ids.txt (distinct)
-uv run python -m cna.resolve_authors    # -> resolve-cache.sqlite (resumable)
-uv run python -m cna.build_leaderboard  # -> out/leaderboard.csv + top-N
+uv run python -m cna.fetch_data         # -> zips/  (latest snapshot)
+uv run python -m cna.load_filter        # register newly-noted tweets into the store
+uv run python -m cna.resolve_authors    # fetch author + text for new tweets (resumable)
+uv run python -m cna.build_leaderboard  # -> out/leaderboard.csv + out/noted_tweets.csv
 ```
 
-`resolve_authors` is resumable: Ctrl-C and re-run; terminal results are cached,
-only transient errors retried. Knobs: `--rps` (default 10), `--concurrency`
-(default 8), `--limit N` (test).
+`resolve_authors` is resumable and `.lock`-guarded (no two at once). Knobs:
+`--rps` (default 10), `--concurrency` (default 8), `--limit N` (test).
+
+## Persistent store & outputs
+
+`resolve-cache.sqlite` → table `tweets`, one row per tweet ever noted, keyed by
+`tweet_id`, accumulating across all runs. Key columns: `first_noted_at_ms` (when
+the post first got a note), `author_id`/`screen_name`, `text`, `tweet_created_at`,
+`favorite_count`, `status`. Outputs:
+
+- `out/leaderboard.csv` — accounts ranked by # of publicly-shown-noted posts.
+- `out/noted_tweets.csv` — every tracked tweet with its text, author, when it
+  got noted, likes, and status.
 
 ## Status (current data, 2026-05-15)
 
-2,692,626 notes → 245,575 `CURRENTLY_RATED_HELPFUL` →
-**201,902 distinct publicly-shown-noted tweets** to resolve. Sample resolve rate
-~80% (rest deleted/suspended). At 10 rps the full resolve takes ~5–6 h.
+2,692,626 notes → 245,575 `CURRENTLY_RATED_HELPFUL` → **201,902 distinct
+publicly-shown-noted tweets** tracked; ~65% attributable to a live account
+(rest deleted/suspended before we could capture them). One-time text backfill
+of the ~131k live tweets takes ~3 h at 12 rps; incremental runs after that are
+minutes.
