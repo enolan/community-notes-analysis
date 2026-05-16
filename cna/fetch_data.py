@@ -34,12 +34,12 @@ UA = "community-notes-analysis/0.1 (+https://github.com/)"
 
 
 def _url(date: dt.date, dataset: str, shard: int) -> str:
-    return (
-        f"{BASE}/{date:%Y/%m/%d}/{dataset}/{dataset}-{shard:05d}.zip"
-    )
+    return f"{BASE}/{date:%Y/%m/%d}/{dataset}/{dataset}-{shard:05d}.zip"
 
 
-def find_latest_date(client: httpx.Client, start: dt.date, max_lookback: int) -> dt.date:
+def find_latest_date(
+    client: httpx.Client, start: dt.date, max_lookback: int
+) -> dt.date:
     """Most recent date whose notes-00000.zip exists (data lags 0-2 days)."""
     for back in range(max_lookback + 1):
         d = start - dt.timedelta(days=back)
@@ -93,11 +93,13 @@ def fetch(date: dt.date | None, max_lookback: int) -> dt.date:
                 remote = int(head.headers.get("content-length", -1))
                 dest = os.path.join(ZIPS_DIR, f"{dataset}-{shard:05d}.zip")
                 if os.path.exists(dest) and os.path.getsize(dest) == remote:
-                    print(f"  skip  {os.path.basename(dest)} (up to date, "
-                          f"{remote/1e6:.1f} MB)")
+                    print(
+                        f"  skip  {os.path.basename(dest)} (up to date, "
+                        f"{remote / 1e6:.1f} MB)"
+                    )
                 else:
                     got = download(client, url, dest)
-                    print(f"  got   {os.path.basename(dest)} ({got/1e6:.1f} MB)")
+                    print(f"  got   {os.path.basename(dest)} ({got / 1e6:.1f} MB)")
                 shard += 1
     return date
 

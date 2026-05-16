@@ -59,8 +59,7 @@ def _read_streams(streams: list, columns: list[str]) -> pa.Table:
     """
     conv = pacsv.ConvertOptions(include_columns=columns)
     tables = [
-        pacsv.read_csv(s, parse_options=_PARSE, convert_options=conv)
-        for s in streams
+        pacsv.read_csv(s, parse_options=_PARSE, convert_options=conv) for s in streams
     ]
     return pa.concat_tables(tables, promote_options="default")
 
@@ -79,9 +78,7 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     zip_nsh = os.path.join(ZIPS_DIR, "noteStatusHistory-*.zip")
     if glob.glob(zip_notes) and glob.glob(zip_nsh):
         notes = _read_streams(list(_zip_streams(zip_notes)), NOTE_COLS)
-        nsh = _read_streams(
-            list(_zip_streams(zip_nsh)), ["noteId", "currentStatus"]
-        )
+        nsh = _read_streams(list(_zip_streams(zip_nsh)), ["noteId", "currentStatus"])
         return notes, nsh, f"fresh zips ({ZIPS_DIR})"
 
     fresh_notes = os.path.join(FRESH_DIR, "notes-*.tsv")

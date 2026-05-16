@@ -37,8 +37,13 @@ def main() -> None:
     step("2/4 filter to publicly-shown notes", ["cna.load_filter"])
     step(
         "3/4 resolve tweet authors (resumable)",
-        ["cna.resolve_authors", "--rps", str(args.rps),
-         "--concurrency", str(args.concurrency)],
+        [
+            "cna.resolve_authors",
+            "--rps",
+            str(args.rps),
+            "--concurrency",
+            str(args.concurrency),
+        ],
     )
     step("4/4 build leaderboard", ["cna.build_leaderboard", "--top", str(args.top)])
     print("\nDone. See out/leaderboard.csv")

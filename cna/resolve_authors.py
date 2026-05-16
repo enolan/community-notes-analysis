@@ -221,9 +221,7 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
         if batch:
             flush(batch)
 
-    by_status = dict(
-        db.execute("SELECT status, COUNT(*) FROM tweets GROUP BY status")
-    )
+    by_status = dict(db.execute("SELECT status, COUNT(*) FROM tweets GROUP BY status"))
     with_text = db.execute(
         "SELECT COUNT(*) FROM tweets WHERE text IS NOT NULL"
     ).fetchone()[0]

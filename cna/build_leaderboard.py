@@ -58,8 +58,16 @@ def main() -> None:
     with open(TWEETS_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(
-            ["tweet_id", "screen_name", "author_id", "first_noted_at",
-             "tweet_created_at", "favorite_count", "status", "text"]
+            [
+                "tweet_id",
+                "screen_name",
+                "author_id",
+                "first_noted_at",
+                "tweet_created_at",
+                "favorite_count",
+                "status",
+                "text",
+            ]
         )
         for tid, aid, sn, status, noted_ms, created, favs, text in rows:
             status_counts[status or "(unresolved)"] += 1
@@ -67,8 +75,16 @@ def main() -> None:
                 tweets_by_author[aid] += 1
                 handle[aid] = sn or handle.get(aid, "")
             w.writerow(
-                [tid, sn or "", aid or "", _iso(noted_ms), created or "",
-                 favs if favs is not None else "", status or "", text or ""]
+                [
+                    tid,
+                    sn or "",
+                    aid or "",
+                    _iso(noted_ms),
+                    created or "",
+                    favs if favs is not None else "",
+                    status or "",
+                    text or "",
+                ]
             )
 
     leaderboard = sorted(
@@ -86,22 +102,29 @@ def main() -> None:
     pending = status_counts.get("(unresolved)", 0) + status_counts.get("error", 0)
 
     print(f"Tweets tracked (all runs):       {total:,}")
-    print(f"  attributed to an author (ok):  {attributed:,}  "
-          f"({attributed / total:.1%})" if total else "")
+    print(
+        f"  attributed to an author (ok):  {attributed:,}  ({attributed / total:.1%})"
+        if total
+        else ""
+    )
     print(f"  text captured & stored:        {text_saved:,}")
-    print(f"  unattributable (deleted/susp): "
-          f"{total - attributed - pending:,}")
+    print(f"  unattributable (deleted/susp): {total - attributed - pending:,}")
     if pending:
-        print(f"  NOT YET RESOLVED:              {pending:,}  "
-              f"(run cna.resolve_authors)")
-    print("  status breakdown: " + ", ".join(
-        f"{s}={c:,}" for s, c in status_counts.most_common()))
+        print(
+            f"  NOT YET RESOLVED:              {pending:,}  (run cna.resolve_authors)"
+        )
+    print(
+        "  status breakdown: "
+        + ", ".join(f"{s}={c:,}" for s, c in status_counts.most_common())
+    )
     print(f"\nUnique accounts ranked: {len(leaderboard):,}")
     print(f"  -> {LEADERBOARD_CSV}")
     print(f"  -> {TWEETS_CSV}  (tweet text for every tracked tweet)")
 
-    print(f"\nTop {min(args.top, len(leaderboard))} accounts by publicly-shown "
-          f"Community Notes:")
+    print(
+        f"\nTop {min(args.top, len(leaderboard))} accounts by publicly-shown "
+        f"Community Notes:"
+    )
     print(f"{'#':>4}  {'handle':<24} {'noted tweets':>12}")
     for rank, (aid, n) in enumerate(leaderboard[: args.top], 1):
         print(f"{rank:>4}  @{handle.get(aid, ''):<23} {n:>12,}")
