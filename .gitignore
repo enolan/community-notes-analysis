@@ -16,3 +16,12 @@ zips/
 *.parquet
 *.tsv
 resolve-cache.sqlite*
+
+# Generated site artifacts (regenerable by cna.export_site)
+web/assets/leaderboard.json
+web/assets/meta.json
+web/d1/sync.sql
+web/d1/sync_state.json
+
+# Wrangler local cache / account state
+.wrangler/

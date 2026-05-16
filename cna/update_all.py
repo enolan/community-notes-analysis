@@ -33,10 +33,10 @@ def main() -> None:
     args = ap.parse_args()
 
     fetch = ["cna.fetch_data"] + (["--date", args.date] if args.date else [])
-    step("1/4 fetch latest data", fetch)
-    step("2/4 filter to publicly-shown notes", ["cna.load_filter"])
+    step("1/5 fetch latest data", fetch)
+    step("2/5 filter to publicly-shown notes", ["cna.load_filter"])
     step(
-        "3/4 resolve tweet authors (resumable)",
+        "3/5 resolve tweet authors (resumable)",
         [
             "cna.resolve_authors",
             "--rps",
@@ -45,8 +45,9 @@ def main() -> None:
             str(args.concurrency),
         ],
     )
-    step("4/4 build leaderboard", ["cna.build_leaderboard", "--top", str(args.top)])
-    print("\nDone. See out/leaderboard.csv")
+    step("4/5 build leaderboard", ["cna.build_leaderboard", "--top", str(args.top)])
+    step("5/5 export site artifacts", ["cna.export_site"])
+    print("\nDone. See out/leaderboard.csv and web/ (run wrangler to deploy)")
 
 
 if __name__ == "__main__":
