@@ -25,13 +25,14 @@ import os
 import sys
 import time
 import zipfile
-
-from cna.db import TERMINAL, connect
+from contextlib import ExitStack
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
+
+from cna.db import TERMINAL, connect
 
 HELPFUL = "CURRENTLY_RATED_HELPFUL"
 # createdAtMillis = when the note was written -> earliest = when this post got noted
@@ -84,14 +85,21 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     fresh_notes = os.path.join(FRESH_DIR, "notes-*.tsv")
     fresh_nsh = os.path.join(FRESH_DIR, "noteStatusHistory-*.tsv")
     if glob.glob(fresh_notes) and glob.glob(fresh_nsh):
-        notes = _read_streams(
-            [open(p, "rb") for p in sorted(glob.glob(fresh_notes))],
-            NOTE_COLS,
-        )
-        nsh = _read_streams(
-            [open(p, "rb") for p in sorted(glob.glob(fresh_nsh))],
-            ["noteId", "currentStatus"],
-        )
+        with ExitStack() as stack:
+            notes = _read_streams(
+                [
+                    stack.enter_context(open(p, "rb"))
+                    for p in sorted(glob.glob(fresh_notes))
+                ],
+                NOTE_COLS,
+            )
+            nsh = _read_streams(
+                [
+                    stack.enter_context(open(p, "rb"))
+                    for p in sorted(glob.glob(fresh_nsh))
+                ],
+                ["noteId", "currentStatus"],
+            )
         return notes, nsh, f"fresh TSV ({FRESH_DIR})"
 
     notes_pq = os.path.join(ROOT, "data", "notes.parquet")
@@ -132,6 +140,7 @@ def main() -> None:
         for tid, ms in zip(
             first_noted["tweetId"].to_pylist(),
             first_noted["createdAtMillis_min"].to_pylist(),
+            strict=True,
         )
         if tid and tid not in ("0", "-1") and ms is not None
     ]
