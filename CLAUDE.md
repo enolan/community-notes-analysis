@@ -39,7 +39,8 @@ needs an authenticated `wrangler`.
   tightens on already-synced rows, an incremental export misses it — use
   `scripts/deploy.sh --full` to correct.
 - Data source precedence (first match wins): fresh zips in `zips/`, then TSVs in
-  `data/fresh/`, then the offline Hugging Face parquet mirror in `data/`.
+  `data/fresh/`. Both are the X-generated TSVs read directly; there is no
+  parquet/arrow path.
 
 ## Git
 
