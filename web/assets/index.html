@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Note Ledger — accounts ranked by publicly-shown Community Notes</title>
+<meta name="description" content="Every X account whose posts reached a publicly-shown Community Note, ranked by how often it happened.">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,560;1,6..72,400;1,6..72,560&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div class="mast-rule"></div>
+    <div class="dateline"><span>The Note Ledger</span><span id="dateline-date"></span></div>
+    <div class="mast-rule"></div>
+    <h1 class="title">Accounts, ranked by the notes <em>they earned</em></h1>
+    <p class="standfirst">Every X account whose posts reached a publicly-shown
+       Community Note, ordered by how often it happened.</p>
+    <div class="stats" id="stats"></div>
+    <div class="stamp" id="stamp" role="button" tabindex="0">Counts are a lower bound — see note ↓</div>
+  </header>
+
+  <div class="search">
+    <input id="q" type="search" autocomplete="off" spellcheck="false"
+           placeholder="Filter by handle…" aria-label="Filter accounts by handle">
+    <div class="count" id="resultcount"></div>
+  </div>
+
+  <section class="ledger" aria-label="Leaderboard">
+    <div class="lgrid lhead"><span>Rank</span><span>Account</span><span class="num">Notes</span></div>
+    <div id="rows"></div>
+    <div id="sentinel" style="height:1px"></div>
+  </section>
+
+  <footer id="disclaimer"></footer>
+</div>
+<script src="/app.js" defer></script>
+</body>
+</html>

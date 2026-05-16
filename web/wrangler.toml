@@ -1,0 +1,14 @@
+name = "cn-leaderboard"
+main = "src/worker.ts"
+compatibility_date = "2025-05-01"
+
+# Static assets (index.html, app.js, styles.css, leaderboard.json, meta.json)
+# are served first; the Worker runs only for paths with no matching asset
+# (i.e. /a/:author_id and /@handle).
+[assets]
+directory = "./assets"
+
+[[d1_databases]]
+binding = "cn_leaderboard"
+database_name = "cn-leaderboard"
+database_id = "3e538755-046e-4f92-9f99-3833a699ebf3"
