@@ -7,10 +7,12 @@ Data is published daily; `notes` is sharded (00000, 00001, ...),
 leaderboard (ratings/userEnrollment/batSignals are skipped — they're huge and
 unused).
 
-Finds the most recent date with data (probing back from today), then downloads
-every shard for each dataset into zips/, overwriting the same filenames so the
-rest of the pipeline (which globs zips/notes-*.zip) always sees one date.
-Skips a shard whose local size already matches the server's.
+Finds the most recent date whose snapshot is *complete* (every dataset
+published, not just `notes` — the provider publishes them at different times),
+then downloads every shard for each dataset into zips/, overwriting the same
+filenames so the rest of the pipeline (which globs zips/notes-*.zip) always
+sees one date. Skips a shard whose local size already matches the server's,
+and prunes shards left from an older snapshot that had more of them.
 
 Usage:
   uv run python -m cna.fetch_data [--date YYYY-MM-DD] [--max-lookback 10]
@@ -40,15 +42,17 @@ def _url(date: dt.date, dataset: str, shard: int) -> str:
 def find_latest_date(
     client: httpx.Client, start: dt.date, max_lookback: int
 ) -> dt.date:
-    """Most recent date whose notes-00000.zip exists (data lags 0-2 days)."""
+    """Most recent date whose snapshot is *complete* — shard 0 of every
+    dataset we need exists. The provider publishes `notes` before
+    `noteStatusHistory`, so checking only `notes` would pick a half-published
+    day and fail mid-fetch; requiring all DATASETS makes selection atomic."""
     for back in range(max_lookback + 1):
         d = start - dt.timedelta(days=back)
-        r = client.head(_url(d, "notes", 0))
-        if r.status_code == 200:
+        if all(client.head(_url(d, ds, 0)).status_code == 200 for ds in DATASETS):
             return d
     sys.exit(
-        f"No Community Notes data found in the {max_lookback} days before "
-        f"{start:%Y-%m-%d}. The publish URL scheme may have changed."
+        f"No complete Community Notes snapshot in the {max_lookback} days "
+        f"before {start:%Y-%m-%d}. The publish URL scheme may have changed."
     )
 
 
@@ -101,6 +105,18 @@ def fetch(date: dt.date | None, max_lookback: int) -> dt.date:
                     got = download(client, url, dest)
                     print(f"  got   {os.path.basename(dest)} ({got / 1e6:.1f} MB)")
                 shard += 1
+
+            # Drop shards left over from a previous snapshot that had more
+            # of them — otherwise load_filter's notes-*.zip glob would mix
+            # two dates' data.
+            stale = shard
+            while True:
+                p = os.path.join(ZIPS_DIR, f"{dataset}-{stale:05d}.zip")
+                if not os.path.exists(p):
+                    break
+                os.remove(p)
+                print(f"  prune {os.path.basename(p)} (stale from older snapshot)")
+                stale += 1
     return date
 
 
