@@ -25,3 +25,9 @@ web/d1/sync_state.json
 
 # Wrangler local cache / account state
 .wrangler/
+
+# Transient run logs (pipeline / deploy / resolve)
+*.log
+
+# Claude Code scheduler lock (harness-managed, per-session)
+.claude/scheduled_tasks.lock
