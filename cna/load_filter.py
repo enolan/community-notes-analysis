@@ -65,12 +65,16 @@ def _read_streams(streams: list, columns: list[str]) -> pa.Table:
     return pa.concat_tables(tables, promote_options="default")
 
 
-def _zip_streams(pattern: str):
-    """Yield (open binary stream) for the single TSV inside each matched zip."""
+def _zip_streams(pattern: str, stack: ExitStack):
+    """Yield a binary stream for the single TSV inside each matched zip.
+
+    Both the ZipFile and the inner member stream are registered on `stack`,
+    so they close once parsing finishes rather than leaking until GC.
+    """
     for zp in sorted(glob.glob(pattern)):
-        zf = zipfile.ZipFile(zp)
+        zf = stack.enter_context(zipfile.ZipFile(zp))
         name = next(n for n in zf.namelist() if n.endswith(".tsv"))
-        yield zf.open(name, "r")
+        yield stack.enter_context(zf.open(name, "r"))
 
 
 def load_tables() -> tuple[pa.Table, pa.Table, str]:
@@ -78,8 +82,11 @@ def load_tables() -> tuple[pa.Table, pa.Table, str]:
     zip_notes = os.path.join(ZIPS_DIR, "notes-*.zip")
     zip_nsh = os.path.join(ZIPS_DIR, "noteStatusHistory-*.zip")
     if glob.glob(zip_notes) and glob.glob(zip_nsh):
-        notes = _read_streams(list(_zip_streams(zip_notes)), NOTE_COLS)
-        nsh = _read_streams(list(_zip_streams(zip_nsh)), ["noteId", "currentStatus"])
+        with ExitStack() as stack:
+            notes = _read_streams(list(_zip_streams(zip_notes, stack)), NOTE_COLS)
+            nsh = _read_streams(
+                list(_zip_streams(zip_nsh, stack)), ["noteId", "currentStatus"]
+            )
         return notes, nsh, f"fresh zips ({ZIPS_DIR})"
 
     fresh_notes = os.path.join(FRESH_DIR, "notes-*.tsv")
