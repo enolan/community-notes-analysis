@@ -61,6 +61,21 @@ uv run python -m cna.build_leaderboard  # -> out/leaderboard.csv + out/noted_twe
 `resolve_authors` is resumable and `.lock`-guarded (no two at once). Knobs:
 `--rps` (default 10), `--concurrency` (default 8), `--limit N` (test).
 
+## Deploy the site
+
+`update_all` step 5 (`cna.export_site`) writes `web/assets/{leaderboard,meta}.json`
+and a delta `web/d1/sync.sql`. To publish the current store to the live
+Cloudflare Worker + D1 site:
+
+```sh
+scripts/deploy.sh           # export → apply delta to remote D1 → mark applied → deploy
+scripts/deploy.sh --full    # full resync (after a big backfill; run occasionally)
+```
+
+It only publishes what's already in `resolve-cache.sqlite` — run
+`cna.update_all` first to pull/resolve new data. Needs an authenticated
+`bunx wrangler`. Live: <https://cn-leaderboard.echo-6d6.workers.dev>.
+
 ## Persistent store & outputs
 
 `resolve-cache.sqlite` → table `tweets`, one row per tweet ever noted, keyed by
