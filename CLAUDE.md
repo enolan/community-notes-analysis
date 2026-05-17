@@ -41,6 +41,14 @@ needs an authenticated `wrangler`.
 - Data source precedence (first match wins): fresh zips in `zips/`, then TSVs in
   `data/fresh/`. Both are the X-generated TSVs read directly; there is no
   parquet/arrow path.
+- `tweets.raw_json` (gzip-compressed verbatim syndication payload) is the
+  source of truth — never drop it. Site-facing extras (media, quoted tweet,
+  …) are *derived* from it in `export_site` (`_derive`), not stored columns:
+  surfacing more of the payload is an edit there, never another scrape. A
+  one-time `resolve_authors` backfill fills it for pre-existing `ok` rows; a
+  row gone-by-backfill keeps its old columns and gets the `gzip(b'{}')`
+  sentinel. Run `scripts/deploy.sh --full` once after that backfill (and apply
+  `web/d1/migrate.sql` to live D1 first, like the avatar/note migration).
 
 ## Git
 

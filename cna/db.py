@@ -30,6 +30,20 @@ Columns:
   avatar_url         the account's profile image URL (pbs.twimg.com) at
                      resolve time — the `_normal` 48px variant
   is_blue_verified   1 if the account had a blue check at resolve time
+  raw_json           gzip-compressed bytes of the full syndication payload,
+                     captured verbatim on every successful ('ok') resolve and
+                     kept forever. This is the source of truth: any field X
+                     ships (media, quoted tweet, link cards, X's own birdwatch
+                     pivot, reply/thread context, geo, edit history, full user
+                     profile) can be re-derived from here with no re-fetch, so
+                     a "we didn't record that" backfill never has to scrape
+                     again. A previously-'ok' tweet that has gone away by the
+                     time of the one-time backfill keeps all its old columns
+                     and gets the sentinel gzip(b'{}') here so it isn't
+                     refetched forever. The other columns above are still
+                     materialised at resolve time because cna queries and the
+                     leaderboard index them; media/quoted are derived from
+                     this blob at export time instead (site-only, unindexed).
   resolved_at        unix time of the successful/terminal resolve
 """
 
@@ -57,6 +71,7 @@ CREATE TABLE IF NOT EXISTS tweets (
     display_name      TEXT,
     avatar_url        TEXT,
     is_blue_verified  INTEGER,
+    raw_json          BLOB,
     resolved_at       REAL
 );
 CREATE INDEX IF NOT EXISTS tweets_status ON tweets(status);
@@ -72,6 +87,7 @@ _LATER_COLUMNS = {
     "is_blue_verified": "INTEGER",
     "note_text": "TEXT",
     "text_truncated": "INTEGER",
+    "raw_json": "BLOB",
 }
 
 # Statuses that are final: once set we never refetch the tweet.

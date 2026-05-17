@@ -8,10 +8,17 @@ that deleted/suspended/protected tweets return a tombstone instead of a user
 most likely to be gone).
 
 Captures author id/handle, the tweet's text (kept forever, even if the post is
-later deleted), creation time and like count, into the persistent `tweets`
-table. Resumable: re-running only fetches tweets that are new, errored, or
-resolved-OK-but-missing-text (one-time backfill); terminally-resolved tweets
-with text are never refetched, so you can Ctrl-C and continue.
+later deleted), creation time and like count, AND the full raw syndication
+payload (gzip-compressed) into the persistent `tweets` table. The raw payload
+is the source of truth — any field X returns can be re-derived from it later
+with no re-fetch. Resumable: re-running only fetches tweets that are new,
+errored, resolved-OK-but-missing-text, or resolved-OK-but-missing-raw-payload
+(one-time backfills); terminally-resolved tweets with text and a payload are
+never refetched, so you can Ctrl-C and continue.
+
+The raw-payload backfill is the last backfill that should ever be needed: once
+every 'ok' row has its verbatim payload, future "we didn't store that" needs
+become local re-parses in cna.export_site, not another scrape.
 
 Usage:
   uv run python -m cna.resolve_authors [--limit N] [--concurrency C] [--rps R]
@@ -22,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fcntl
+import gzip
 import math
 import os
 import re
@@ -71,6 +79,10 @@ def pending_ids(db: sqlite3.Connection) -> list[str]:
 
       * never resolved, or a transient error
       * resolved OK before we captured text (one-time text backfill)
+      * resolved OK before we captured the raw payload (one-time payload
+        backfill — the big one; every pre-existing 'ok' row, run once). A row
+        that no longer resolves keeps its old columns and is stamped with a
+        sentinel payload so it drops out of this set permanently.
       * one tweet per author that has no avatar yet — the account's *latest*
         tweet, so the one-time avatar/name backfill captures the freshest
         profile (syndication returns the account's current avatar regardless
@@ -88,7 +100,8 @@ def pending_ids(db: sqlite3.Connection) -> list[str]:
         for r in db.execute(
             f"""SELECT tweet_id FROM tweets
                 WHERE status NOT IN ({",".join("?" * len(TERMINAL))})
-                   OR (status = 'ok' AND text IS NULL)""",
+                   OR (status = 'ok' AND text IS NULL)
+                   OR (status = 'ok' AND raw_json IS NULL)""",
             TERMINAL,
         )
     }
@@ -143,8 +156,15 @@ class RateLimiter:
             await asyncio.sleep(sleep_for)
 
 
+# Stamped into raw_json for a previously-'ok' tweet that has since gone away,
+# so the one-time payload backfill doesn't keep selecting it forever. Decodes
+# to `{}` — no media, no quoted tweet — so export treats it as "nothing here".
+RAW_GONE = gzip.compress(b"{}")
+
 # (status, author_id, screen_name, text, tweet_created_at, favorite_count,
-#  display_name, avatar_url, is_blue_verified, text_truncated)
+#  display_name, avatar_url, is_blue_verified, text_truncated, raw)
+# `raw` is the verbatim, *uncompressed* payload bytes on an 'ok' resolve and
+# None otherwise; run() compresses it before it touches the DB.
 Result = tuple[
     str,
     str | None,
@@ -156,12 +176,13 @@ Result = tuple[
     str | None,
     int | None,
     int | None,
+    bytes | None,
 ]
 
 
 def _fail(status: str) -> Result:
     """A terminal/transient non-resolve: status only, every field NULL."""
-    return (status, None, None, None, None, None, None, None, None, None)
+    return (status, None, None, None, None, None, None, None, None, None, None)
 
 
 _MISS: Result = _fail("tombstone")
@@ -204,6 +225,7 @@ def classify(resp: httpx.Response) -> Result:
                 if u.get("is_blue_verified") is not None
                 else None,
                 truncated,
+                resp.content,  # verbatim payload; kept forever once stored
             )
         # Tombstone: deleted / suspended / protected / age-restricted.
         msg = (
@@ -268,43 +290,78 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
             async with sem:
                 return await fetch_one(client, limiter, tid)
 
-        upd = (
+        upd_full = (
             "UPDATE tweets SET status=?, author_id=?, screen_name=?, text=?, "
             "tweet_created_at=?, favorite_count=?, display_name=?, avatar_url=?, "
-            "is_blue_verified=?, text_truncated=?, resolved_at=? WHERE tweet_id=?"
+            "is_blue_verified=?, text_truncated=?, raw_json=?, resolved_at=? "
+            "WHERE tweet_id=?"
         )
+        # A row that is already 'ok' but no longer resolves (deleted/suspended
+        # since): never overwrite its captured author/text/etc — just stamp the
+        # sentinel payload so the one-time backfill stops selecting it.
+        upd_preserve = "UPDATE tweets SET raw_json=? WHERE tweet_id=?"
+        prior_ok = {
+            r[0] for r in db.execute("SELECT tweet_id FROM tweets WHERE status='ok'")
+        }
 
-        def flush(batch: list[tuple]) -> None:
-            db.executemany(upd, batch)
+        def flush(full: list[tuple], preserve: list[tuple]) -> None:
+            if full:
+                db.executemany(upd_full, full)
+            if preserve:
+                db.executemany(upd_preserve, preserve)
             db.commit()
-            batch.clear()
+            full.clear()
+            preserve.clear()
 
         tasks = [asyncio.create_task(worker(t)) for t in todo]
-        batch: list[tuple] = []
+        full: list[tuple] = []
+        preserve: list[tuple] = []
         for fut in asyncio.as_completed(tasks):
             (
                 tid,
-                (status, aid, sn, text, created, favs, dname, av, blue, trunc),
+                (status, aid, sn, text, created, favs, dname, av, blue, trunc, raw),
             ) = await fut
-            batch.append(
-                (
-                    status,
-                    aid,
-                    sn,
-                    text,
-                    created,
-                    favs,
-                    dname,
-                    av,
-                    blue,
-                    trunc,
-                    time.time(),
-                    tid,
+            if status == "ok":
+                full.append(
+                    (
+                        status,
+                        aid,
+                        sn,
+                        text,
+                        created,
+                        favs,
+                        dname,
+                        av,
+                        blue,
+                        trunc,
+                        gzip.compress(raw) if raw is not None else None,
+                        time.time(),
+                        tid,
+                    )
                 )
-            )
+            elif tid in prior_ok:
+                preserve.append((RAW_GONE, tid))
+            else:
+                full.append(
+                    (
+                        status,
+                        aid,
+                        sn,
+                        text,
+                        created,
+                        favs,
+                        dname,
+                        av,
+                        blue,
+                        trunc,
+                        None,
+                        time.time(),
+                        tid,
+                    )
+                )
             done += 1
-            if len(batch) >= 200:
-                flush(batch)
+            if len(full) + len(preserve) >= 200:
+                flush(full, preserve)
             if done % 1000 == 0 or done == total:
                 rate = done / (time.monotonic() - t0)
                 eta = (total - done) / rate / 60 if rate else 0
@@ -312,17 +369,20 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
                     f"  {done:,}/{total:,}  {rate:4.1f}/s  ETA {eta:5.1f} min",
                     flush=True,
                 )
-        if batch:
-            flush(batch)
+        flush(full, preserve)
 
     by_status = dict(db.execute("SELECT status, COUNT(*) FROM tweets GROUP BY status"))
     with_text = db.execute(
         "SELECT COUNT(*) FROM tweets WHERE text IS NOT NULL"
     ).fetchone()[0]
+    with_raw = db.execute(
+        "SELECT COUNT(*) FROM tweets WHERE raw_json IS NOT NULL"
+    ).fetchone()[0]
     print("\nTweet store status breakdown:")
     for s, c in sorted(by_status.items(), key=lambda x: -x[1]):
         print(f"  {s or '(unresolved)':14s} {c:,}")
     print(f"  tweets with text saved: {with_text:,}")
+    print(f"  tweets with raw payload: {with_raw:,}")
 
 
 def main() -> None:
