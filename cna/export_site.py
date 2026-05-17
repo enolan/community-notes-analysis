@@ -15,6 +15,14 @@ Only `status='ok'` rows go to D1: those are the only tweets with a resolved
 author, i.e. the only ones an account page can show. The leaderboard is
 precomputed here so the Worker never aggregates ~200k rows per request.
 
+The `media_json` / `quoted_json` D1 columns are not stored in resolve-cache;
+they're derived per-row here from the verbatim `raw_json` payload (see
+`_derive`). Re-derived on every export, so surfacing more of the payload later
+is a one-line change here, never another scrape. D1 stays lean — the ~100 MB
+of raw payloads never leave resolve-cache; only these small JSON blobs ship.
+After the one-time payload backfill, run `--full` once so every existing row
+gets its media/quoted columns (a delta only re-emits freshly-resolved rows).
+
 Watermark: rows newly resolved since the last export (by `resolved_at`) are
 re-emitted. `INSERT OR REPLACE` makes re-applying harmless. Known limitation:
 `first_noted_at_ms` (and `note_text`, which tracks it) can tighten on a later
@@ -30,9 +38,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gzip
 import json
 import os
 import time
+from typing import Any, cast
 
 from cna.db import connect
 
@@ -59,7 +69,15 @@ D1_COLS = (
     "favorite_count",
     "display_name",
     "avatar_url",
+    "media_json",
+    "quoted_json",
     "resolved_at",
+)
+
+# What we actually pull from resolve-cache: media_json/quoted_json don't exist
+# as stored columns — they're derived per-row from the raw payload below.
+SELECT_COLS = tuple(
+    "raw_json" if c == "media_json" else c for c in D1_COLS if c != "quoted_json"
 )
 
 D1_SCHEMA = """\
@@ -75,11 +93,76 @@ CREATE TABLE IF NOT EXISTS tweets (
     favorite_count    INTEGER,
     display_name      TEXT,
     avatar_url        TEXT,
+    media_json        TEXT,
+    quoted_json       TEXT,
     resolved_at       REAL
 );
 CREATE INDEX IF NOT EXISTS tweets_author ON tweets(author_id);
 CREATE INDEX IF NOT EXISTS tweets_screen ON tweets(screen_name);
 """
+
+
+def _dump(o: object) -> str:
+    return json.dumps(o, separators=(",", ":"), ensure_ascii=False)
+
+
+def _obj(x: object) -> dict[str, Any]:
+    """A syndication payload node as a string-keyed dict, or {} if it isn't
+    one. Centralises the loose-JSON access so the type checker sees a single
+    well-typed shape instead of `dict[Unknown, Unknown]` at every `.get`."""
+    return cast("dict[str, Any]", x) if isinstance(x, dict) else {}
+
+
+def _media(md: object) -> list[dict]:
+    """Compact media list for the site: type + the https thumbnail URL (for
+    video/gif, X's `media_url_https` is the poster frame). No mirroring — the
+    Worker hotlinks these, exactly like avatars."""
+    out: list[dict] = []
+    if not isinstance(md, list):
+        return out
+    for item in md:
+        m = _obj(item)
+        u = m.get("media_url_https")
+        if not u:
+            continue
+        kind = {"photo": "photo", "video": "video", "animated_gif": "gif"}.get(
+            m.get("type") or "", "photo"
+        )
+        out.append({"t": kind, "u": u})
+    return out
+
+
+def _derive(blob: bytes | None) -> tuple[str | None, str | None]:
+    """(media_json, quoted_json) derived from the verbatim syndication payload.
+    The sentinel gzip(b'{}') (a gone-by-backfill row) decodes to {} → both
+    None. Re-derived on every export, so adding more fields later is just an
+    edit here — never another scrape."""
+    if not blob:
+        return (None, None)
+    try:
+        p = _obj(json.loads(gzip.decompress(blob)))
+    except Exception:
+        return (None, None)
+    if not p:
+        return (None, None)
+    media = _media(p.get("mediaDetails"))
+    media_json = _dump(media) if media else None
+    quoted_json = None
+    q = _obj(p.get("quoted_tweet"))
+    qu = _obj(q.get("user"))
+    if q and qu:
+        quoted_json = _dump(
+            {
+                "sn": qu.get("screen_name"),
+                "name": qu.get("name"),
+                "aid": qu.get("id_str"),
+                "qid": q.get("id_str"),
+                "text": q.get("text"),
+                "media": _media(q.get("mediaDetails")),
+            }
+        )
+    return (media_json, quoted_json)
+
 
 # Multi-row INSERT sizing. Literals are inlined, so the real constraint is
 # D1's ~100 KB per-statement cap (exceeding it -> SQLITE_TOOBIG). The cap is
@@ -213,15 +296,24 @@ def main() -> None:
     watermark = None if args.full else state.get("applied_resolved_at")
     if watermark is None:
         cur = db.execute(
-            f"SELECT {','.join(D1_COLS)} FROM tweets "
+            f"SELECT {','.join(SELECT_COLS)} FROM tweets "
             "WHERE status='ok' ORDER BY resolved_at"
         )
     else:
         cur = db.execute(
-            f"SELECT {','.join(D1_COLS)} FROM tweets "
+            f"SELECT {','.join(SELECT_COLS)} FROM tweets "
             "WHERE status='ok' AND resolved_at > ? ORDER BY resolved_at",
             (watermark,),
         )
+
+    # SELECT_COLS layout -> D1_COLS layout: replace the raw payload blob
+    # (second-to-last) with the two derived JSON columns; resolved_at stays
+    # last so the watermark logic below is unchanged.
+    def _to_d1(srow: tuple) -> tuple:
+        media_json, quoted_json = _derive(srow[-2])
+        return srow[:-2] + (media_json, quoted_json, srow[-1])
+
+    rows = (_to_d1(r) for r in cur)
 
     n_rows = 0
     max_resolved = watermark or 0.0
@@ -241,7 +333,7 @@ def main() -> None:
                 batch_bytes = 0
 
         head_bytes = len(insert_head.encode())
-        for row in cur:
+        for row in rows:
             tup = "(" + ",".join(_sql_lit(v) for v in row) + ")"
             tup_bytes = len(tup.encode()) + 2  # +",\n" joiner
             # Flush *before* appending if this row would push the statement

@@ -23,6 +23,24 @@ interface TweetRow {
   first_noted_at_ms: number | null;
   tweet_created_at: string | null;
   favorite_count: number | null;
+  // Compact JSON derived from the raw syndication payload by cna.export_site.
+  // media_json: [{t:"photo"|"video"|"gif",u:thumbUrl}, ...] | null
+  // quoted_json: {sn,name,aid,qid,text,media:[...]} | null
+  media_json: string | null;
+  quoted_json: string | null;
+}
+
+interface MediaItem {
+  t: "photo" | "video" | "gif";
+  u: string;
+}
+interface Quoted {
+  sn: string | null;
+  name: string | null;
+  aid: string | null;
+  qid: string | null;
+  text: string | null;
+  media: MediaItem[];
 }
 
 // Notes longer than this get a no-JS "show more" clamp; shorter ones render
@@ -51,6 +69,81 @@ function noteBlock(note: string | null, i: number): string {
     body +
     `<label for=${id} class=note-more></label>` +
     "</aside>"
+  );
+}
+
+// Attached media. We never mirror — thumbnails are hotlinked straight from
+// X's CDN (pbs.twimg.com), same as avatars, with referrerpolicy=no-referrer.
+// For video/gif the URL is the poster frame. If X 404s the asset the <img>
+// onerror swaps in a text chip so the post still reads as "media was here".
+const MEDIA_LABEL = { photo: "Image", video: "Video", gif: "GIF" } as const;
+
+function mediaGrid(items: MediaItem[], href: string): string {
+  const cells = items
+    .map((m) => {
+      const t = m.t in MEDIA_LABEL ? m.t : "photo";
+      const label = MEDIA_LABEL[t as keyof typeof MEDIA_LABEL];
+      const badge =
+        t === "video"
+          ? '<span class=mi-b>▶ Video</span>'
+          : t === "gif"
+            ? '<span class=mi-b>GIF</span>'
+            : "";
+      return (
+        `<a class=mi href="${esc(href)}" rel="nofollow noopener" target=_blank>` +
+        `<img src="${esc(m.u)}" alt="" loading=lazy referrerpolicy=no-referrer ` +
+        "onerror=\"this.style.display='none';" +
+        "this.parentElement.querySelector('.mi-x').style.display='flex'\">" +
+        `<span class=mi-x>▢ ${label} — not available</span>` +
+        badge +
+        "</a>"
+      );
+    })
+    .join("");
+  return `<div class=media>${cells}</div>`;
+}
+
+function mediaBlock(json: string | null, href: string): string {
+  if (!json) return "";
+  let items: MediaItem[];
+  try {
+    items = JSON.parse(json);
+  } catch {
+    return "";
+  }
+  if (!Array.isArray(items) || items.length === 0) return "";
+  return mediaGrid(items, href);
+}
+
+function quotedBlock(json: string | null): string {
+  if (!json) return "";
+  let q: Quoted;
+  try {
+    q = JSON.parse(json);
+  } catch {
+    return "";
+  }
+  if (!q || !q.sn) return "";
+  const handle = esc(q.sn);
+  const name = esc(q.name?.trim() || q.sn);
+  // Link to our own account page when we know the numeric id; otherwise out to X.
+  const header =
+    q.aid && /^\d{1,25}$/.test(q.aid)
+      ? `/a/${q.aid}`
+      : `https://x.com/${encodeURIComponent(q.sn)}`;
+  const qUrl = q.qid
+    ? `https://x.com/i/web/status/${encodeURIComponent(q.qid)}`
+    : header;
+  const txt = q.text ? `<div class=q-b>${esc(q.text)}</div>` : "";
+  const media =
+    Array.isArray(q.media) && q.media.length ? mediaGrid(q.media, qUrl) : "";
+  return (
+    '<blockquote class=quoted>' +
+    `<a class=q-h href="${esc(header)}" rel="nofollow noopener">` +
+    `<b>${name}</b> <span class=q-at>@${handle}</span></a>` +
+    txt +
+    media +
+    "</blockquote>"
   );
 }
 
@@ -140,7 +233,7 @@ async function accountPage(env: Env, authorId: string): Promise<Response> {
   const { results } = await env.cn_leaderboard
     .prepare(
       "SELECT tweet_id, text, text_truncated, note_text, first_noted_at_ms, " +
-        "tweet_created_at, favorite_count " +
+        "tweet_created_at, favorite_count, media_json, quoted_json " +
         "FROM tweets WHERE author_id=?1 ORDER BY first_noted_at_ms DESC",
     )
     .bind(authorId)
@@ -170,6 +263,8 @@ async function accountPage(env: Env, authorId: string): Promise<Response> {
         `<article class=record><div class=idx>${i + 1}</div><div>` +
         `<div class=body>${esc(t.text ?? "(text not captured)")}</div>` +
         trunc +
+        mediaBlock(t.media_json, url) +
+        quotedBlock(t.quoted_json) +
         noteBlock(t.note_text, i) +
         '<div class=meta>' +
         `<span><span class=k>Posted</span> <time>${esc(posted)}</time></span>` +

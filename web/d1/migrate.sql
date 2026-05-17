@@ -12,3 +12,10 @@ ALTER TABLE tweets ADD COLUMN display_name TEXT;
 ALTER TABLE tweets ADD COLUMN avatar_url TEXT;
 ALTER TABLE tweets ADD COLUMN note_text TEXT;
 ALTER TABLE tweets ADD COLUMN text_truncated INTEGER;
+-- Added alongside attached-media + quoted-tweet display. Run the two lines
+-- below once (same caveat: a re-run errors with "duplicate column name",
+-- which just means it's already applied — safe to ignore). Each is a small
+-- JSON string derived from the raw payload by cna.export_site; NULL when the
+-- post had no media / wasn't a quote-tweet.
+ALTER TABLE tweets ADD COLUMN media_json TEXT;
+ALTER TABLE tweets ADD COLUMN quoted_json TEXT;
