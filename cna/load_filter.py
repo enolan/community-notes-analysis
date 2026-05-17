@@ -9,7 +9,9 @@ Data source resolution (first match wins):
 A note "was publicly shown" iff its noteStatusHistory.currentStatus is
 CURRENTLY_RATED_HELPFUL. We join notes->status on noteId and emit the set of
 distinct tweetIds that have >=1 such note. That distinct-tweet set is the input
-to author resolution and the denominator for the leaderboard.
+to author resolution and the denominator for the leaderboard. We also stash the
+body of each tweet's *primary* (earliest helpful) note into tweets.note_text —
+it's already in the CN data, so the site can show the note with no extra fetch.
 
 Output:
   out/helpful_tweet_ids.txt  one tweetId per line, distinct, sorted
@@ -19,6 +21,7 @@ Output:
 from __future__ import annotations
 
 import glob
+import html
 import json
 import os
 import sys
@@ -31,8 +34,9 @@ from io import TextIOWrapper
 from cna.db import TERMINAL, connect
 
 HELPFUL = "CURRENTLY_RATED_HELPFUL"
-# createdAtMillis = when the note was written -> earliest = when this post got noted
-NOTE_COLS = ["noteId", "tweetId", "createdAtMillis"]
+# createdAtMillis = when the note was written -> earliest = when this post got
+# noted. `summary` is the note's body; the CN export HTML-escapes it.
+NOTE_COLS = ["noteId", "tweetId", "createdAtMillis", "summary"]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, "out")
 FRESH_DIR = os.path.join(ROOT, "data", "fresh")
@@ -106,10 +110,12 @@ def main() -> None:
             if status == HELPFUL:
                 helpful.add(note_id)
 
-        # Pass 2: earliest helpful note per tweet = when that post first got a note.
-        first_noted: dict[str, int] = {}
+        # Pass 2: earliest helpful note per tweet = when that post first got a
+        # note. We also keep that same (earliest) note's body as the tweet's
+        # "primary" note. value = (createdAtMillis, summary).
+        first_noted: dict[str, tuple[int, str]] = {}
         total_notes = 0
-        for note_id, tweet_id, created in _iter_rows(notes_streams, NOTE_COLS):
+        for note_id, tweet_id, created, summary in _iter_rows(notes_streams, NOTE_COLS):
             total_notes += 1
             if note_id not in helpful:
                 continue
@@ -117,8 +123,8 @@ def main() -> None:
                 continue
             ms = int(created)
             prev = first_noted.get(tweet_id)
-            if prev is None or ms < prev:
-                first_noted[tweet_id] = ms
+            if prev is None or ms < prev[0]:
+                first_noted[tweet_id] = (ms, html.unescape(summary))
 
     rows = list(first_noted.items())
 
@@ -127,14 +133,24 @@ def main() -> None:
     # and only have first_noted_at_ms tightened to the earliest seen.
     now = time.time()
     db = connect()
+    # note_text follows first_noted_at_ms: adopt this snapshot's primary-note
+    # body only when it's the *earlier* one (or we had none), so the stored
+    # note always matches the note whose time is first_noted_at_ms.
     db.executemany(
-        """INSERT INTO tweets (tweet_id, first_noted_at_ms, first_seen_at, status)
-           VALUES (?, ?, ?, '')
+        """INSERT INTO tweets
+               (tweet_id, first_noted_at_ms, first_seen_at, status, note_text)
+           VALUES (?, ?, ?, '', ?)
            ON CONFLICT(tweet_id) DO UPDATE SET
                first_noted_at_ms = MIN(
                    IFNULL(tweets.first_noted_at_ms, excluded.first_noted_at_ms),
-                   excluded.first_noted_at_ms)""",
-        [(tid, ms, now) for tid, ms in rows],
+                   excluded.first_noted_at_ms),
+               note_text = CASE
+                   WHEN tweets.note_text IS NULL
+                        OR excluded.first_noted_at_ms <
+                           IFNULL(tweets.first_noted_at_ms,
+                                  excluded.first_noted_at_ms)
+                   THEN excluded.note_text ELSE tweets.note_text END""",
+        [(tid, ms, now, summary) for tid, (ms, summary) in rows],
     )
     db.commit()
 

@@ -16,13 +16,32 @@ let filtered = [];
 let shown = 0;
 let seeded = false; // load-in stagger only fires once
 
+// rows: [author_id, screen_name, display_name, avatar_url, noted_tweets]
 function rowHTML(r, rank, seed) {
   const cls = seed ? "row lgrid seed" : "row lgrid";
+  const handle = r[1];
+  const dname = (r[2] || "").trim();
+  const avatar = r[3];
+  const initial = esc((dname || handle || "?").charAt(0).toUpperCase() || "?");
+  // The initial sits behind the <img>; if the image 404s (avatar changed /
+  // account gone) the <img> removes itself and the monogram shows through.
+  const av =
+    `<span class="av" data-i="${initial}">` +
+    (avatar
+      ? `<img src="${esc(avatar)}" alt="" loading="lazy" ` +
+        `referrerpolicy="no-referrer" onerror="this.remove()">`
+      : "") +
+    `</span>`;
+  const nameLine =
+    dname && dname.toLowerCase() !== handle.toLowerCase()
+      ? `<span class="dname">${esc(dname)}</span>`
+      : "";
   return (
     `<a class="${cls}" href="/a/${encodeURIComponent(r[0])}">` +
     `<span class="rank">${fmt(rank)}</span>` +
-    `<span class="handle">${esc(r[1])}</span>` +
-    `<span class="notes">${fmt(r[2])}</span></a>`
+    av +
+    `<span class="acct">${nameLine}<span class="handle">${esc(handle)}</span></span>` +
+    `<span class="notes">${fmt(r[4])}</span></a>`
   );
 }
 
@@ -59,7 +78,13 @@ function render(reset) {
 
 function applyFilter() {
   const q = qEl.value.trim().toLowerCase();
-  filtered = q ? all.filter((r) => r[1].toLowerCase().includes(q)) : all;
+  filtered = q
+    ? all.filter(
+        (r) =>
+          r[1].toLowerCase().includes(q) ||
+          (r[2] && r[2].toLowerCase().includes(q)),
+      )
+    : all;
   render(true);
 }
 

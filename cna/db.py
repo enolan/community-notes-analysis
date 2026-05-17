@@ -16,8 +16,20 @@ Columns:
   screen_name        the account handle at resolve time
   text               the tweet's text, captured at resolve time and kept
                      forever even if the post is later deleted
+  text_truncated     1 if `text` is only the ~280-char head of a longer post
+                     (syndication advertised a note_tweet but gave no body);
+                     0 if it's the full post; NULL if unknown/not applicable
+  note_text          the body of the *primary* Community Note on this post —
+                     the earliest currently-helpful note (same note whose
+                     createdAtMillis is first_noted_at_ms). From the CN data,
+                     so it's full text and needs no fetch. Append-only: kept
+                     even if the note later loses helpful status.
   tweet_created_at   when the post itself was created (from syndication)
   favorite_count     like count at resolve time
+  display_name       the account's display name at resolve time
+  avatar_url         the account's profile image URL (pbs.twimg.com) at
+                     resolve time — the `_normal` 48px variant
+  is_blue_verified   1 if the account had a blue check at resolve time
   resolved_at        unix time of the successful/terminal resolve
 """
 
@@ -38,13 +50,29 @@ CREATE TABLE IF NOT EXISTS tweets (
     author_id         TEXT,
     screen_name       TEXT,
     text              TEXT,
+    text_truncated    INTEGER,
+    note_text         TEXT,
     tweet_created_at  TEXT,
     favorite_count    INTEGER,
+    display_name      TEXT,
+    avatar_url        TEXT,
+    is_blue_verified  INTEGER,
     resolved_at       REAL
 );
 CREATE INDEX IF NOT EXISTS tweets_status ON tweets(status);
 CREATE INDEX IF NOT EXISTS tweets_author ON tweets(author_id);
 """
+
+# Columns added after the original schema shipped. SQLite has no
+# `ADD COLUMN IF NOT EXISTS`, so we diff against PRAGMA table_info and add
+# only what's missing — cheap and idempotent on every connect().
+_LATER_COLUMNS = {
+    "display_name": "TEXT",
+    "avatar_url": "TEXT",
+    "is_blue_verified": "INTEGER",
+    "note_text": "TEXT",
+    "text_truncated": "INTEGER",
+}
 
 # Statuses that are final: once set we never refetch the tweet.
 TERMINAL = ("ok", "tombstone", "suspended", "notfound")
@@ -53,9 +81,19 @@ TERMINAL = ("ok", "tombstone", "suspended", "notfound")
 def connect() -> sqlite3.Connection:
     db = sqlite3.connect(DB_PATH)
     db.executescript(SCHEMA)
+    _add_missing_columns(db)
     _migrate_legacy(db)
     db.commit()
     return db
+
+
+def _add_missing_columns(db: sqlite3.Connection) -> None:
+    """Add columns introduced after the first schema to a pre-existing
+    `tweets` table. No-op once they're present."""
+    have = {r[1] for r in db.execute("PRAGMA table_info(tweets)")}
+    for name, decl in _LATER_COLUMNS.items():
+        if name not in have:
+            db.execute(f"ALTER TABLE tweets ADD COLUMN {name} {decl}")
 
 
 def _migrate_legacy(db: sqlite3.Connection) -> None:

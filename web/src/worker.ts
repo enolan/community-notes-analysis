@@ -18,9 +18,40 @@ interface Env {
 interface TweetRow {
   tweet_id: string;
   text: string | null;
+  text_truncated: number | null;
+  note_text: string | null;
   first_noted_at_ms: number | null;
   tweet_created_at: string | null;
   favorite_count: number | null;
+}
+
+// Notes longer than this get a no-JS "show more" clamp; shorter ones render
+// whole. Roughly the 70th percentile of note length.
+const NOTE_CLAMP = 360;
+
+// Whether `text` is only the ~280-char head of a longer post. This can't be
+// inferred from the stored text (the cut leaves no ellipsis/marker) — it's a
+// resolve-time flag from the syndication payload. NULL means "short post,
+// definitely complete".
+const isTruncated = (t: TweetRow): boolean => t.text_truncated === 1;
+
+function noteBlock(note: string | null, i: number): string {
+  if (!note) return "";
+  const head = "<div class=note-h>Community Note</div>";
+  const body = `<div class=note-b>${esc(note)}</div>`;
+  if (note.length <= NOTE_CLAMP) {
+    return `<aside class=note>${head}${body}</aside>`;
+  }
+  // Checkbox-hack disclosure: works with zero JS, single text node.
+  const id = `n${i}`;
+  return (
+    '<aside class="note note-clamp">' +
+    `<input type=checkbox id=${id} class=note-tgl>` +
+    head +
+    body +
+    `<label for=${id} class=note-more></label>` +
+    "</aside>"
+  );
 }
 
 const esc = (s: unknown): string =>
@@ -28,6 +59,11 @@ const esc = (s: unknown): string =>
     /[&<>"]/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!,
   );
+
+// X profile images come back as the 48px `_normal` variant; bump to 400px
+// for the page header. Leaves default-avatar / odd URLs untouched.
+const bigAvatar = (u: string | null): string =>
+  (u ?? "").replace(/_normal(\.\w+)(\?|$)/, "_400x400$1$2");
 
 const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
 function fmtDate(d: Date | null): string {
@@ -87,10 +123,15 @@ function notFound(msg: string): Response {
 async function accountPage(env: Env, authorId: string): Promise<Response> {
   const handleRow = await env.cn_leaderboard
     .prepare(
-      "SELECT screen_name FROM tweets WHERE author_id=?1 ORDER BY resolved_at DESC LIMIT 1",
+      "SELECT screen_name, display_name, avatar_url FROM tweets " +
+        "WHERE author_id=?1 ORDER BY resolved_at DESC LIMIT 1",
     )
     .bind(authorId)
-    .first<{ screen_name: string | null }>();
+    .first<{
+      screen_name: string | null;
+      display_name: string | null;
+      avatar_url: string | null;
+    }>();
 
   if (!handleRow) {
     return notFound("No publicly-shown noted posts on file for this account.");
@@ -98,13 +139,20 @@ async function accountPage(env: Env, authorId: string): Promise<Response> {
 
   const { results } = await env.cn_leaderboard
     .prepare(
-      "SELECT tweet_id, text, first_noted_at_ms, tweet_created_at, favorite_count " +
+      "SELECT tweet_id, text, text_truncated, note_text, first_noted_at_ms, " +
+        "tweet_created_at, favorite_count " +
         "FROM tweets WHERE author_id=?1 ORDER BY first_noted_at_ms DESC",
     )
     .bind(authorId)
     .all<TweetRow>();
 
   const handle = handleRow.screen_name ?? "(unknown)";
+  const dname = handleRow.display_name?.trim() || handle;
+  const avatar = bigAvatar(handleRow.avatar_url);
+  const avatarImg = avatar
+    ? `<img class=avatar src="${esc(avatar)}" alt="" loading=lazy ` +
+      'referrerpolicy=no-referrer onerror="this.remove()">'
+    : "";
   const records = results
     .map((t, i) => {
       const posted = fmtDate(
@@ -114,9 +162,15 @@ async function accountPage(env: Env, authorId: string): Promise<Response> {
         t.first_noted_at_ms ? new Date(t.first_noted_at_ms) : null,
       );
       const url = `https://x.com/i/web/status/${encodeURIComponent(t.tweet_id)}`;
+      const trunc = isTruncated(t)
+        ? '<p class=trunc>Post truncated — X did not return the full text. ' +
+          "Use “View original” for the rest.</p>"
+        : "";
       return (
         `<article class=record><div class=idx>${i + 1}</div><div>` +
         `<div class=body>${esc(t.text ?? "(text not captured)")}</div>` +
+        trunc +
+        noteBlock(t.note_text, i) +
         '<div class=meta>' +
         `<span><span class=k>Posted</span> <time>${esc(posted)}</time></span>` +
         `<span><span class=k>First noted</span> <time>${esc(noted)}</time></span>` +
@@ -129,8 +183,13 @@ async function accountPage(env: Env, authorId: string): Promise<Response> {
 
   const body =
     mast("Subject File") +
+    '<div class=ident>' +
+    avatarImg +
+    '<div class=ident-text>' +
     `<p class=file-no>File № ${esc(authorId)}</p>` +
-    `<h1 class=subject><span class=at>@</span>${esc(handle)}</h1>` +
+    `<h1 class=subject>${esc(dname)}</h1>` +
+    `<p class=at-line><span class=at>@</span>${esc(handle)}</p>` +
+    '</div></div>' +
     `<p class=tally><b>${fmtNum(results.length)}</b> posts that earned a ` +
     "publicly-shown Community Note</p>" +
     '<a class=back href="/">Back to the ledger</a></header>' +

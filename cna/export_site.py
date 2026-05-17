@@ -17,10 +17,10 @@ precomputed here so the Worker never aggregates ~200k rows per request.
 
 Watermark: rows newly resolved since the last export (by `resolved_at`) are
 re-emitted. `INSERT OR REPLACE` makes re-applying harmless. Known limitation:
-`first_noted_at_ms` can tighten on a later run for an *already-synced* row
-without changing `resolved_at`; that change won't propagate until a `--full`
-rebuild. Run `--full` periodically (or after a large backfill) to resync
-everything.
+`first_noted_at_ms` (and `note_text`, which tracks it) can tighten on a later
+run for an *already-synced* row without changing `resolved_at`; that change
+won't propagate until a `--full` rebuild. Run `--full` periodically (or after
+a large backfill) to resync everything.
 
 Usage:
   uv run python -m cna.export_site [--full]
@@ -52,9 +52,13 @@ D1_COLS = (
     "author_id",
     "screen_name",
     "text",
+    "text_truncated",
+    "note_text",
     "first_noted_at_ms",
     "tweet_created_at",
     "favorite_count",
+    "display_name",
+    "avatar_url",
     "resolved_at",
 )
 
@@ -64,18 +68,26 @@ CREATE TABLE IF NOT EXISTS tweets (
     author_id         TEXT,
     screen_name       TEXT,
     text              TEXT,
+    text_truncated    INTEGER,
+    note_text         TEXT,
     first_noted_at_ms INTEGER,
     tweet_created_at  TEXT,
     favorite_count    INTEGER,
+    display_name      TEXT,
+    avatar_url        TEXT,
     resolved_at       REAL
 );
 CREATE INDEX IF NOT EXISTS tweets_author ON tweets(author_id);
 CREATE INDEX IF NOT EXISTS tweets_screen ON tweets(screen_name);
 """
 
-# Rows per multi-row INSERT. Literals are inlined (no bind-var limit); this
-# just keeps individual statements a sane size for `wrangler d1 execute`.
+# Multi-row INSERT sizing. Literals are inlined, so the real constraint is
+# D1's ~100 KB per-statement cap (exceeding it -> SQLITE_TOOBIG). The cap is
+# on UTF-8 *bytes*, and note_text/tweet text is heavily multibyte (emoji,
+# CJK), so size by encoded byte length, not str length. Row ceiling is only
+# a secondary bound.
 BATCH = 200
+MAX_STMT_BYTES = 80_000
 
 
 def _sql_lit(v: object) -> str:
@@ -138,24 +150,35 @@ def main() -> None:
     db = connect()
 
     # --- leaderboard.json (always a full rebuild; it's small) ---------------
-    # Rank by author_id; the displayed handle is the most recently resolved
-    # screen_name for that author.
-    agg = db.execute(
-        """SELECT author_id,
-                  COUNT(*) AS n,
-                  (SELECT screen_name FROM tweets s
-                    WHERE s.author_id = t.author_id AND s.status='ok'
-                    ORDER BY s.resolved_at DESC LIMIT 1) AS handle
-           FROM tweets t
-           WHERE status='ok' AND author_id IS NOT NULL
-           GROUP BY author_id"""
-    ).fetchall()
-    ranked = sorted(agg, key=lambda r: (-r[1], (r[2] or "").lower()))
-    # rank is implicit in position; rows = [author_id, handle, noted_tweets]
+    # Rank by author_id. Handle, display name and avatar are all taken from
+    # that author's most recently resolved row (the one-time backfill refetches
+    # each avatar-less author's *latest* tweet, so this is the freshest known
+    # profile). One pass in Python beats three correlated subqueries per group.
+    counts: dict[str, int] = {}
+    latest: dict[str, tuple[float, str, str, str]] = {}
+    for aid, sn, dname, avatar, ra in db.execute(
+        """SELECT author_id, screen_name, display_name, avatar_url, resolved_at
+           FROM tweets WHERE status='ok' AND author_id IS NOT NULL"""
+    ):
+        counts[aid] = counts.get(aid, 0) + 1
+        ra = ra or 0.0
+        if aid not in latest or ra > latest[aid][0]:
+            latest[aid] = (ra, sn or "", dname or "", avatar or "")
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], latest[kv[0]][1].lower()))
+    # rank is implicit in position
     leaderboard = {
         "generated_at": dt.datetime.now(dt.UTC).isoformat(),
-        "columns": ["author_id", "screen_name", "noted_tweets"],
-        "rows": [[aid, handle or "", n] for aid, n, handle in ranked],
+        "columns": [
+            "author_id",
+            "screen_name",
+            "display_name",
+            "avatar_url",
+            "noted_tweets",
+        ],
+        "rows": [
+            [aid, latest[aid][1], latest[aid][2], latest[aid][3], n]
+            for aid, n in ranked
+        ],
     }
     with open(LEADERBOARD_JSON, "w") as f:
         json.dump(leaderboard, f, separators=(",", ":"))
@@ -208,20 +231,32 @@ def main() -> None:
         f.write("--   bunx wrangler d1 execute <DB> --remote --file web/d1/sync.sql\n")
         f.write(D1_SCHEMA)
         batch: list[str] = []
+        batch_bytes = 0
 
         def flush() -> None:
+            nonlocal batch_bytes
             if batch:
                 f.write(insert_head + ",\n".join(batch) + ";\n")
                 batch.clear()
+                batch_bytes = 0
 
+        head_bytes = len(insert_head.encode())
         for row in cur:
-            batch.append("(" + ",".join(_sql_lit(v) for v in row) + ")")
+            tup = "(" + ",".join(_sql_lit(v) for v in row) + ")"
+            tup_bytes = len(tup.encode()) + 2  # +",\n" joiner
+            # Flush *before* appending if this row would push the statement
+            # over D1's cap (a single row is always emitted, even if huge).
+            if batch and (
+                batch_bytes + tup_bytes + head_bytes >= MAX_STMT_BYTES
+                or len(batch) >= BATCH
+            ):
+                flush()
+            batch.append(tup)
+            batch_bytes += tup_bytes
             n_rows += 1
             resolved_at = row[-1]
             if resolved_at is not None and resolved_at > max_resolved:
                 max_resolved = resolved_at
-            if len(batch) >= BATCH:
-                flush()
         flush()
 
     # Record the candidate watermark as *pending*; applied_resolved_at is

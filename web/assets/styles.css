@@ -67,8 +67,8 @@ h1.title em{color:var(--alarm);font-style:italic}
 
 /* ── Ledger (CSS-grid list of real <a> rows) ────────────── */
 .ledger{margin-top:2px}
-.lgrid{display:grid;grid-template-columns:5.5ch 1fr 9ch;align-items:baseline;
-  gap:14px;padding:15px 0}
+.lgrid{display:grid;grid-template-columns:5.5ch 40px 1fr 9ch;align-items:center;
+  gap:14px;padding:13px 0}
 .lhead{position:sticky;top:64px;background:var(--paper);
   font-size:var(--step--1);letter-spacing:.14em;text-transform:uppercase;
   color:var(--muted);border-bottom:1px solid var(--rule);padding:12px 0;z-index:4}
@@ -76,9 +76,21 @@ h1.title em{color:var(--alarm);font-style:italic}
 .row{text-decoration:none;color:inherit;border-bottom:1px solid var(--rule);
   transition:background .12s}
 .row .rank{color:var(--muted);font-variant-numeric:tabular-nums;font-size:var(--step--1)}
-.row .handle{font-family:var(--serif);font-size:var(--step-1);
+/* Monogram sits under the photo; .av's ::after shows if <img> removes itself. */
+.av{position:relative;width:40px;height:40px;border-radius:50%;
+  background:var(--paper-2);border:1px solid var(--rule);overflow:hidden;
+  flex:none}
+.av::after{content:attr(data-i);position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;font-family:var(--serif);
+  font-size:var(--step-1);color:var(--muted)}
+.av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  background:var(--paper-2)}
+.acct{min-width:0;display:flex;flex-direction:column;line-height:1.22}
+.acct .dname{font-family:var(--serif);font-size:var(--step-1);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.row .handle::before{content:"@";color:var(--muted)}
+.acct .handle{font-size:var(--step--1);color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct .handle::before{content:"@";opacity:.6}
 .row .notes{text-align:right;color:var(--alarm);font-size:var(--step-1);
   font-variant-numeric:tabular-nums}
 .row:hover{background:#1b1a160a}
@@ -91,10 +103,17 @@ h1.title em{color:var(--alarm);font-style:italic}
   font-size:var(--step-1)}
 
 /* ── Account / subject file page ────────────────────────── */
+.ident{display:flex;gap:clamp(16px,3vw,28px);align-items:flex-start;
+  margin-top:6px}
+.ident .avatar{width:clamp(72px,12vw,104px);height:clamp(72px,12vw,104px);
+  border-radius:50%;object-fit:cover;border:1px solid var(--rule-strong);
+  background:var(--paper-2);flex:none}
+.ident-text{min-width:0}
 .file-no{font-size:var(--step--1);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
 .subject{font-family:var(--serif);font-size:var(--step-3);line-height:1;
-  margin:.1em 0 .15em;word-break:break-word}
-.subject .at{color:var(--muted)}
+  margin:.1em 0 .1em;word-break:break-word}
+.at-line{font-size:var(--step-1);color:var(--muted)}
+.at-line .at{opacity:.6}
 .tally{font-size:var(--step-1);color:var(--alarm-ink)}
 .tally b{font-size:var(--step-2);color:var(--alarm);font-variant-numeric:tabular-nums}
 .back{display:inline-block;margin:26px 0 8px;color:var(--ink);
@@ -113,6 +132,30 @@ h1.title em{color:var(--alarm);font-style:italic}
 .record .meta .k{color:#9a9377}
 .record .meta a{color:var(--alarm-ink);text-decoration:none;border-bottom:1px solid currentColor}
 .record .meta time{color:var(--ink)}
+.trunc{margin-top:8px;font-size:var(--step--1);color:var(--alarm-ink);
+  letter-spacing:.03em;font-style:italic}
+
+/* ── Primary Community Note ─────────────────────────────── */
+.note{margin-top:16px;border-left:3px solid var(--alarm);
+  background:#d6431f0a;padding:12px 16px}
+.note-h{font-size:var(--step--1);letter-spacing:.14em;text-transform:uppercase;
+  color:var(--alarm-ink);margin-bottom:6px}
+.note-b{font-family:var(--serif);font-size:1.06rem;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word}
+/* No-JS "show more": a visually-hidden checkbox toggles the clamp. */
+.note-tgl{position:absolute;width:1px;height:1px;opacity:0;
+  clip:rect(0 0 0 0);overflow:hidden}
+.note-clamp .note-b{display:-webkit-box;-webkit-box-orient:vertical;
+  -webkit-line-clamp:6;overflow:hidden}
+.note-tgl:checked ~ .note-b{-webkit-line-clamp:unset;display:block;
+  overflow:visible}
+.note-more{display:inline-block;margin-top:9px;cursor:pointer;
+  font-size:var(--step--1);letter-spacing:.1em;text-transform:uppercase;
+  color:var(--alarm-ink);border-bottom:1px solid currentColor}
+.note-more::after{content:"Show more ↓"}
+.note-tgl:checked ~ .note-more::after{content:"Show less ↑"}
+.note-tgl:focus-visible ~ .note-more{outline:2px solid var(--alarm);
+  outline-offset:3px}
 
 footer{border-top:3px double var(--rule-strong);margin-top:50px;
   padding:24px 0 60px;font-size:var(--step--1);color:var(--muted);line-height:1.7;

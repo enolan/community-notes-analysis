@@ -67,16 +67,63 @@ def make_token(tweet_id: str) -> str:
 
 
 def pending_ids(db: sqlite3.Connection) -> list[str]:
-    """Tweets needing a fetch: never resolved, a transient error, or resolved
-    OK before we captured text (one-time backfill). Terminally-resolved tweets
-    that already have text are skipped — we never refetch them."""
-    q = db.execute(
-        f"""SELECT tweet_id FROM tweets
-            WHERE status NOT IN ({",".join("?" * len(TERMINAL))})
-               OR (status = 'ok' AND text IS NULL)""",
-        TERMINAL,
+    """Tweets needing a fetch:
+
+      * never resolved, or a transient error
+      * resolved OK before we captured text (one-time text backfill)
+      * one tweet per author that has no avatar yet — the account's *latest*
+        tweet, so the one-time avatar/name backfill captures the freshest
+        profile (syndication returns the account's current avatar regardless
+        of which tweet we ask for, but the newest tweet is the most likely to
+        still resolve). Skipped once the author has any avatar on file.
+      * ok tweets near the ~280-char cap whose truncation is still unknown
+        (text_truncated IS NULL) — one-time backfill of the truncation flag.
+        Shorter text can't be a truncation, so those are left as NULL (the
+        site treats NULL as "not truncated").
+
+    Terminally-resolved tweets that already have text are otherwise never
+    refetched."""
+    todo = {
+        r[0]
+        for r in db.execute(
+            f"""SELECT tweet_id FROM tweets
+                WHERE status NOT IN ({",".join("?" * len(TERMINAL))})
+                   OR (status = 'ok' AND text IS NULL)""",
+            TERMINAL,
+        )
+    }
+
+    have_avatar = {
+        r[0]
+        for r in db.execute(
+            "SELECT DISTINCT author_id FROM tweets "
+            "WHERE avatar_url IS NOT NULL AND author_id IS NOT NULL"
+        )
+    }
+    # Latest ok tweet per avatar-less author. tweet_created_at is ISO 8601, so
+    # it sorts chronologically as a string; first_noted_at_ms breaks ties.
+    latest: dict[str, tuple[tuple[str, int], str]] = {}
+    for aid, tid, created, noted in db.execute(
+        "SELECT author_id, tweet_id, tweet_created_at, first_noted_at_ms "
+        "FROM tweets WHERE status='ok' AND author_id IS NOT NULL"
+    ):
+        if aid in have_avatar:
+            continue
+        key = (created or "", noted or 0)
+        if aid not in latest or key > latest[aid][0]:
+            latest[aid] = (key, tid)
+    todo.update(tid for _, tid in latest.values())
+
+    # Truncation backfill: only posts at/near the cap can be truncated. 270
+    # leaves margin below the 277/280 cut so none is missed.
+    todo.update(
+        r[0]
+        for r in db.execute(
+            "SELECT tweet_id FROM tweets WHERE status='ok' "
+            "AND text_truncated IS NULL AND length(text) >= 270"
+        )
     )
-    return [r[0] for r in q]
+    return list(todo)
 
 
 class RateLimiter:
@@ -96,14 +143,33 @@ class RateLimiter:
             await asyncio.sleep(sleep_for)
 
 
-# (status, author_id, screen_name, text, tweet_created_at, favorite_count)
-Result = tuple[str, str | None, str | None, str | None, str | None, int | None]
-_MISS: Result = ("tombstone", None, None, None, None, None)
+# (status, author_id, screen_name, text, tweet_created_at, favorite_count,
+#  display_name, avatar_url, is_blue_verified, text_truncated)
+Result = tuple[
+    str,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    int | None,
+    int | None,
+]
+
+
+def _fail(status: str) -> Result:
+    """A terminal/transient non-resolve: status only, every field NULL."""
+    return (status, None, None, None, None, None, None, None, None, None)
+
+
+_MISS: Result = _fail("tombstone")
 
 
 def classify(resp: httpx.Response) -> Result:
     if resp.status_code == 404:
-        return ("notfound", None, None, None, None, None)
+        return _fail("notfound")
     if resp.status_code == 200:
         try:
             data = resp.json()
@@ -113,15 +179,18 @@ def classify(resp: httpx.Response) -> Result:
             return _MISS
         if data.get("__typename") == "Tweet" and isinstance(data.get("user"), dict):
             u = data["user"]
-            # `note_tweet` carries the full body of long (>280) posts.
-            text = (
-                data.get("note_tweet", {})
-                .get("note_tweet_results", {})
-                .get("result", {})
-                .get("text")
-                if isinstance(data.get("note_tweet"), dict)
+            # `note_tweet` carries the full body of long (>280) posts. When
+            # the post is long but syndication ships the note_tweet object
+            # *without* a body, all we get is the ~280-char `text` head — that
+            # is the (otherwise invisible, no ellipsis) truncation.
+            nt = data.get("note_tweet")
+            body = (
+                nt.get("note_tweet_results", {}).get("result", {}).get("text")
+                if isinstance(nt, dict)
                 else None
-            ) or data.get("text")
+            )
+            text = body or data.get("text")
+            truncated = 1 if (isinstance(nt, dict) and not body) else 0
             return (
                 "ok",
                 u.get("id_str"),
@@ -129,15 +198,21 @@ def classify(resp: httpx.Response) -> Result:
                 text,
                 data.get("created_at"),
                 data.get("favorite_count"),
+                u.get("name"),
+                u.get("profile_image_url_https"),
+                int(bool(u.get("is_blue_verified")))
+                if u.get("is_blue_verified") is not None
+                else None,
+                truncated,
             )
         # Tombstone: deleted / suspended / protected / age-restricted.
         msg = (
             ((data.get("tombstone", {}) or {}).get("text", {}) or {}).get("text") or ""
         ).lower()
         if "suspend" in msg:
-            return ("suspended", None, None, None, None, None)
+            return _fail("suspended")
         if "protect" in msg or "private" in msg:
-            return ("protected", None, None, None, None, None)
+            return _fail("protected")
         return _MISS
     raise httpx.HTTPStatusError("retry", request=resp.request, response=resp)
 
@@ -163,7 +238,7 @@ async def fetch_one(
         except (httpx.TransportError, httpx.HTTPStatusError):
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60.0)
-    return tweet_id, ("error", None, None, None, None, None)
+    return tweet_id, _fail("error")
 
 
 async def run(limit: int | None, concurrency: int, rps: float) -> None:
@@ -195,7 +270,8 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
 
         upd = (
             "UPDATE tweets SET status=?, author_id=?, screen_name=?, text=?, "
-            "tweet_created_at=?, favorite_count=?, resolved_at=? WHERE tweet_id=?"
+            "tweet_created_at=?, favorite_count=?, display_name=?, avatar_url=?, "
+            "is_blue_verified=?, text_truncated=?, resolved_at=? WHERE tweet_id=?"
         )
 
         def flush(batch: list[tuple]) -> None:
@@ -206,8 +282,26 @@ async def run(limit: int | None, concurrency: int, rps: float) -> None:
         tasks = [asyncio.create_task(worker(t)) for t in todo]
         batch: list[tuple] = []
         for fut in asyncio.as_completed(tasks):
-            tid, (status, aid, sn, text, created, favs) = await fut
-            batch.append((status, aid, sn, text, created, favs, time.time(), tid))
+            (
+                tid,
+                (status, aid, sn, text, created, favs, dname, av, blue, trunc),
+            ) = await fut
+            batch.append(
+                (
+                    status,
+                    aid,
+                    sn,
+                    text,
+                    created,
+                    favs,
+                    dname,
+                    av,
+                    blue,
+                    trunc,
+                    time.time(),
+                    tid,
+                )
+            )
             done += 1
             if len(batch) >= 200:
                 flush(batch)
