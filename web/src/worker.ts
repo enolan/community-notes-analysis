@@ -170,6 +170,23 @@ const FONTS =
   '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' +
   '<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,560;1,6..72,400;1,6..72,560&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">';
 
+// Progressive enhancement for the no-JS note clamp (see styles.css). The
+// toggle is gated on char count but the clamp is line-based, so a long note
+// that wraps to ≤6 lines gets a dead toggle. This measures real overflow —
+// via line-height math, which is independent of clamp/checkbox/expanded state,
+// so it stays correct after the user expands or the viewport resizes — and
+// marks fitting notes .note-fits (drops the clamp, hides the toggle). With JS
+// off, nothing runs and the checkbox hack behaves exactly as before.
+const NOTE_FIT_SCRIPT =
+  "<script>(function(){function f(){var N=document.querySelectorAll" +
+  "('.note-clamp');for(var i=0;i<N.length;i++){var n=N[i]," +
+  "b=n.querySelector('.note-b');if(!b)continue;var c=getComputedStyle(b)," +
+  "lh=parseFloat(c.lineHeight)||parseFloat(c.fontSize)*1.5;" +
+  "n.classList.toggle('note-fits',b.scrollHeight<=lh*6+1)}}var r;" +
+  "function s(){cancelAnimationFrame(r);r=requestAnimationFrame(f)}f();" +
+  "addEventListener('resize',s);if(document.fonts&&document.fonts.ready)" +
+  "document.fonts.ready.then(f)})()</script>";
+
 function page(title: string, body: string, status = 200): Response {
   const html =
     "<!doctype html><html lang=en><head><meta charset=utf-8>" +
@@ -177,7 +194,9 @@ function page(title: string, body: string, status = 200): Response {
     `<title>${esc(title)}</title>${FONTS}` +
     '<link rel=stylesheet href="/styles.css"></head><body><div class=wrap>' +
     body +
-    "</div></body></html>";
+    "</div>" +
+    NOTE_FIT_SCRIPT +
+    "</body></html>";
   return new Response(html, {
     status,
     headers: {

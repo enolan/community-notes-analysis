@@ -182,6 +182,14 @@ h1.title em{color:var(--alarm);font-style:italic}
 .note-tgl:checked ~ .note-more::after{content:"Show less ↑"}
 .note-tgl:focus-visible ~ .note-more{outline:2px solid var(--alarm);
   outline-offset:3px}
+/* Progressive enhancement: a note long enough (>NOTE_CLAMP chars) to get the
+   toggle can still wrap to ≤6 lines on a wide column, so the line-clamp never
+   bites and the toggle is a dead control. The inline script measures real
+   overflow and adds .note-fits to drop the clamp + hide the toggle. With JS
+   off this class is never set, so behaviour is exactly the checkbox hack. */
+.note-clamp.note-fits .note-b{-webkit-line-clamp:unset;display:block;
+  overflow:visible}
+.note-clamp.note-fits .note-more{display:none}
 
 footer{border-top:3px double var(--rule-strong);margin-top:50px;
   padding:24px 0 60px;font-size:var(--step--1);color:var(--muted);line-height:1.7;
