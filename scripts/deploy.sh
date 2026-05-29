@@ -19,6 +19,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 DB_NAME="cn-leaderboard"   # matches [[d1_databases]].database_name in web/wrangler.toml
+
+# Load a long-lived Cloudflare API token from a gitignored file so wrangler
+# never drops into the browser OAuth flow (its login tokens expire fast). The
+# file holds just the token on one line. If it's missing/empty we fall back to
+# whatever auth wrangler already has (env var or `wrangler login`).
+TOKEN_FILE="$ROOT/.cloudflare-token"
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" && -s "$TOKEN_FILE" ]]; then
+  CLOUDFLARE_API_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+  export CLOUDFLARE_API_TOKEN
+fi
+
 EXPORT_ARGS=()
 [[ "${1:-}" == "--full" ]] && EXPORT_ARGS+=(--full)
 

@@ -26,6 +26,9 @@ web/d1/sync_state.json
 # Wrangler local cache / account state
 .wrangler/
 
+# Long-lived Cloudflare API token for deploy.sh (secret — never commit)
+.cloudflare-token
+
 # Transient run logs (pipeline / deploy / resolve)
 *.log
 
