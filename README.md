@@ -27,18 +27,18 @@ what they said.
 The logged-in download page at `x.com/i/communitynotes/download-data` just
 links plain public files: `ton.twimg.com/birdwatch-public-data/YYYY/MM/DD/
 <dataset>/<dataset>-NNNNN.zip` (`.zip`, published daily, no auth). `fetch_data`
-pulls these directly. Sources, first match wins:
+pulls these directly. `load_filter` reads the X-generated TSVs inside them;
+sources, first match wins:
 
 1. **Fresh zips** — `zips/notes-*.zip` + `zips/noteStatusHistory-*.zip` exactly
    as downloaded from the logged-in page. Only those two datasets are read;
    `ratings`/`userEnrollment`/`batSignals` are ignored.
 2. **Fresh TSV** — the same shards unzipped into `data/fresh/`.
-3. **Mirror** — `deadbirds/x-community-notes-parquet-20250222` (HF), a ~Feb 2025
-   snapshot, at `data/notes.parquet` + `data/nsh.parquet` (dev fallback).
 
 ## Run
 
-One command does everything (fetch latest → filter → resolve → leaderboard):
+One command does everything (fetch latest → filter → resolve → leaderboard →
+export site artifacts):
 
 ```sh
 uv run python -m cna.update_all          # add --date YYYY-MM-DD to pin a snapshot
@@ -56,6 +56,7 @@ uv run python -m cna.fetch_data         # -> zips/  (latest snapshot)
 uv run python -m cna.load_filter        # register newly-noted tweets into the store
 uv run python -m cna.resolve_authors    # fetch author + text for new tweets (resumable)
 uv run python -m cna.build_leaderboard  # -> out/leaderboard.csv + out/noted_tweets.csv
+uv run python -m cna.export_site        # -> web/assets/*.json + web/d1/sync.sql
 ```
 
 `resolve_authors` is resumable and `.lock`-guarded (no two at once). Knobs:
@@ -73,8 +74,11 @@ scripts/deploy.sh --full    # full resync (after a big backfill; run occasionall
 ```
 
 It only publishes what's already in `resolve-cache.sqlite` — run
-`cna.update_all` first to pull/resolve new data. Needs an authenticated
-`bunx wrangler`. Live: <https://cn-leaderboard.echo-6d6.workers.dev>.
+`cna.update_all` first to pull/resolve new data. Run `bun install` in `web/`
+once first; the script runs wrangler under Node (see the comment in
+`deploy.sh`), so `node` must be on `PATH`. Auth: put a Cloudflare API token on
+one line in `.cloudflare-token` (gitignored), or set `CLOUDFLARE_API_TOKEN`, or
+fall back to `wrangler login`. Live: <https://cn-leaderboard.echo-6d6.workers.dev>.
 
 ## Persistent store & outputs
 
@@ -94,3 +98,7 @@ publicly-shown-noted tweets** tracked; ~65% attributable to a live account
 (rest deleted/suspended before we could capture them). One-time text backfill
 of the ~131k live tweets takes ~3 h at 12 rps; incremental runs after that are
 minutes.
+
+## License
+
+BSD 3-Clause — see [LICENSE](LICENSE).

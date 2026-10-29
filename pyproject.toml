@@ -3,6 +3,8 @@ name = "community-notes-analysis"
 version = "0.1.0"
 description = "Rank X/Twitter accounts by how many publicly-shown Community Notes their posts received"
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
