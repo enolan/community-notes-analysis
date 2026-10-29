@@ -52,6 +52,6 @@ needs an authenticated `wrangler`.
 
 ## Git
 
-A GitHub remote will be added later; until then commit to `main`. Once a remote
-exists, use normal branch/PR etiquette. Commit subjects follow `Add <feature>`
-for features and `module: <change>` for fixes.
+Remote: `origin` = github.com/enolan/community-notes-analysis (public). Use
+normal branch/PR etiquette — don't commit straight to `main`. Commit subjects
+follow `Add <feature>` for features and `module: <change>` for fixes.

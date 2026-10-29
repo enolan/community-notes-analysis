@@ -32,7 +32,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ZIPS_DIR = os.path.join(ROOT, "zips")
 BASE = "https://ton.twimg.com/birdwatch-public-data"
 DATASETS = ("notes", "noteStatusHistory")
-UA = "community-notes-analysis/0.1 (+https://github.com/)"
+UA = (
+    "community-notes-analysis/0.1 (+https://github.com/enolan/community-notes-analysis)"
+)
 
 
 def _url(date: dt.date, dataset: str, shard: int) -> str:
